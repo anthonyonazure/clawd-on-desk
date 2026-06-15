@@ -422,9 +422,19 @@ function flushRuntimeStateToPrefs() {
   const theme = getActiveTheme();
   // #408: persist the frozen keep-size, not the live window bounds — otherwise a
   // bounds value inflated by a DPI flux gets saved and restored on relaunch.
-  const persistPx = (keepSizeAcrossDisplaysCached && isProportionalMode())
+  const isFrozenActive = keepSizeAcrossDisplaysCached && isProportionalMode();
+  const persistPx = isFrozenActive
     ? getEffectiveCurrentPixelSize()
     : { width: bounds.width, height: bounds.height };
+  // #408 round-2: also persist the frozen-origin work area (kept independent
+  // of positionDisplay; see the schema comment on savedPixelWorkArea). Calling
+  // getEffectiveCurrentPixelSize above already lazy-seeded the origin if it
+  // wasn't seeded yet.
+  const persistOriginWa = isFrozenActive
+    ? (keepSizeFrozenOriginWa
+        ? { width: keepSizeFrozenOriginWa.width, height: keepSizeFrozenOriginWa.height }
+        : null)
+    : null;
   _settingsController.applyBulk({
     x: bounds.x,
     y: bounds.y,
@@ -434,6 +444,7 @@ function flushRuntimeStateToPrefs() {
     positionDisplay: captureCurrentDisplaySnapshot(bounds),
     savedPixelWidth: persistPx.width,
     savedPixelHeight: persistPx.height,
+    savedPixelWorkArea: persistOriginWa,
     size: currentSize,
     miniMode: _mini.getMiniMode(),
     miniEdge: _mini.getMiniEdge(),
@@ -734,6 +745,27 @@ function getCurrentPixelSize(overrideWa) {
 // at launch and lazily on first use; cleared (→ re-seeded from the proportional
 // size) whenever the size or the keepSize toggle changes.
 let keepSizeFrozenPx = null;
+// #408 round-2: track the *origin* display's work area alongside the frozen
+// pixel size so a legitimate cross-display keep-size (set on a large display,
+// later moved to a smaller one via "Send to display") is not mis-clamped on
+// the next launch — positionDisplay tracks the LAST-FLUSH display, which after
+// a send diverges from the actual frozen origin. Lifecycle mirrors
+// keepSizeFrozenPx (lazy-seeded together, reset together, persisted together).
+let keepSizeFrozenOriginWa = null;
+
+function resetKeepSizeFrozen() {
+  keepSizeFrozenPx = null;
+  keepSizeFrozenOriginWa = null;
+}
+
+function snapshotKeepSizeOriginWa(wa) {
+  if (!wa || typeof wa !== "object") return null;
+  const w = Number(wa.width);
+  const h = Number(wa.height);
+  if (!Number.isFinite(w) || w <= 0) return null;
+  if (!Number.isFinite(h) || h <= 0) return null;
+  return { width: w, height: h };
+}
 
 function getEffectiveCurrentPixelSize(overrideWa) {
   if (keepSizeAcrossDisplaysCached && isProportionalMode()) {
@@ -741,7 +773,18 @@ function getEffectiveCurrentPixelSize(overrideWa) {
     // overrideWa — callers like sendToDisplay/bringPetToPrimaryDisplay pass a
     // *target* display's work area, and seeding from that would freeze the
     // pet at the target's proportional size instead of its realized size.
-    if (!keepSizeFrozenPx) keepSizeFrozenPx = getCurrentPixelSize();
+    if (!keepSizeFrozenPx) {
+      // Mirror getPixelSizeFor's wa resolution so the captured origin matches
+      // the display we actually sized from.
+      let seedWa = null;
+      if (win && !win.isDestroyed()) {
+        const { x, y, width, height } = getPetWindowBounds();
+        seedWa = getNearestWorkArea(x + width / 2, y + height / 2);
+      }
+      if (!seedWa) seedWa = getPrimaryWorkAreaSafe() || SYNTHETIC_WORK_AREA;
+      keepSizeFrozenPx = getProportionalPixelSize(getProportionalRatio(), seedWa);
+      keepSizeFrozenOriginWa = snapshotKeepSizeOriginWa(seedWa);
+    }
     return { width: keepSizeFrozenPx.width, height: keepSizeFrozenPx.height };
   }
   return getCurrentPixelSize(overrideWa);
@@ -2845,7 +2888,7 @@ const { t, buildContextMenu, buildTrayMenu, rebuildAllMenus, createTray,
 
 // ── Settings effect router ──
 const SETTINGS_MIRROR_SETTERS = {
-  lang: (v) => { lang = v; }, size: (v) => { currentSize = v; keepSizeFrozenPx = null; }, showTray: (v) => { showTray = v; },
+  lang: (v) => { lang = v; }, size: (v) => { currentSize = v; resetKeepSizeFrozen(); }, showTray: (v) => { showTray = v; },
   showDock: (v) => { showDock = v; if (macHideController) macHideController.noteManualChange(); }, manageClaudeHooksAutomatically: (v) => { manageClaudeHooksAutomatically = v; },
   autoStartWithClaude: (v) => { autoStartWithClaude = v; }, openAtLogin: (v) => { openAtLogin = v; },
   bubbleFollowPet: (v) => { bubbleFollowPet = v; }, sessionHudEnabled: (v) => { sessionHudEnabled = v; },
@@ -2858,7 +2901,7 @@ const SETTINGS_MIRROR_SETTERS = {
   detachedIdleStaleMs: (v) => { detachedIdleStaleMs = v; },
   soundMuted: (v) => { soundMuted = v; }, soundVolume: (v) => { soundVolume = v; }, lowPowerIdleMode: (v) => { lowPowerIdleMode = v; },
   keepAwakeWhileWorking: (v) => { keepAwakeWhileWorking = v; },
-  allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; keepSizeFrozenPx = null; },
+  allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; resetKeepSizeFrozen(); },
   textScale: (v) => { textScale = v; textScalePreview = null; },
   textScaleByDisplay: (v) => { textScaleByDisplay = v; textScalePreview = null; },
 };
@@ -3176,6 +3219,15 @@ function createWindow() {
   // display events reuse it instead of re-reading transiently-wrong live bounds.
   if (keepSizeAcrossDisplaysCached && isProportionalMode()) {
     keepSizeFrozenPx = { width: size.width, height: size.height };
+    // #408 round-2: restore the frozen origin Wa too. Prefer the dedicated
+    // savedPixelWorkArea (post-fix prefs); fall back to positionDisplay.workArea
+    // for legacy prefs — the next flush will rewrite with the new field.
+    const persistedOrigin = snapshotKeepSizeOriginWa(prefs.savedPixelWorkArea);
+    if (persistedOrigin) {
+      keepSizeFrozenOriginWa = persistedOrigin;
+    } else if (prefs.positionDisplay && prefs.positionDisplay.workArea) {
+      keepSizeFrozenOriginWa = snapshotKeepSizeOriginWa(prefs.positionDisplay.workArea);
+    }
   }
 
   const {
