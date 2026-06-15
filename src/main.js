@@ -420,6 +420,11 @@ function flushRuntimeStateToPrefs() {
   if (!win || win.isDestroyed()) return;
   const bounds = getPetWindowBounds();
   const theme = getActiveTheme();
+  // #408: persist the frozen keep-size, not the live window bounds — otherwise a
+  // bounds value inflated by a DPI flux gets saved and restored on relaunch.
+  const persistPx = (keepSizeAcrossDisplaysCached && isProportionalMode())
+    ? getEffectiveCurrentPixelSize()
+    : { width: bounds.width, height: bounds.height };
   _settingsController.applyBulk({
     x: bounds.x,
     y: bounds.y,
@@ -427,8 +432,8 @@ function flushRuntimeStateToPrefs() {
     positionThemeId: theme ? theme._id : "",
     positionVariantId: theme ? theme._variantId : "",
     positionDisplay: captureCurrentDisplaySnapshot(bounds),
-    savedPixelWidth: bounds.width,
-    savedPixelHeight: bounds.height,
+    savedPixelWidth: persistPx.width,
+    savedPixelHeight: persistPx.height,
     size: currentSize,
     miniMode: _mini.getMiniMode(),
     miniEdge: _mini.getMiniEdge(),
@@ -721,15 +726,23 @@ function getCurrentPixelSize(overrideWa) {
   return getPixelSizeFor(currentSize, overrideWa);
 }
 
+// #408: while keepSizeAcrossDisplays is ON, the frozen pixel size is held in
+// memory (keepSizeFrozenPx) rather than re-read from win.getBounds() on every
+// access. Re-reading the live bounds let a transiently-wrong value during a
+// Windows sleep/wake DPI flux get laundered back through setBounds(), ratcheting
+// the pet larger each cycle ("the longer it sleeps, the bigger it gets"). Seeded
+// at launch and lazily on first use; cleared (→ re-seeded from the proportional
+// size) whenever the size or the keepSize toggle changes.
+let keepSizeFrozenPx = null;
+
 function getEffectiveCurrentPixelSize(overrideWa) {
-  if (
-    keepSizeAcrossDisplaysCached &&
-    isProportionalMode() &&
-    win &&
-    !win.isDestroyed()
-  ) {
-    const bounds = getPetWindowBounds();
-    return { width: bounds.width, height: bounds.height };
+  if (keepSizeAcrossDisplaysCached && isProportionalMode()) {
+    // #408: seed from the CURRENT display's proportional size, never from an
+    // overrideWa — callers like sendToDisplay/bringPetToPrimaryDisplay pass a
+    // *target* display's work area, and seeding from that would freeze the
+    // pet at the target's proportional size instead of its realized size.
+    if (!keepSizeFrozenPx) keepSizeFrozenPx = getCurrentPixelSize();
+    return { width: keepSizeFrozenPx.width, height: keepSizeFrozenPx.height };
   }
   return getCurrentPixelSize(overrideWa);
 }
@@ -2832,7 +2845,7 @@ const { t, buildContextMenu, buildTrayMenu, rebuildAllMenus, createTray,
 
 // ── Settings effect router ──
 const SETTINGS_MIRROR_SETTERS = {
-  lang: (v) => { lang = v; }, size: (v) => { currentSize = v; }, showTray: (v) => { showTray = v; },
+  lang: (v) => { lang = v; }, size: (v) => { currentSize = v; keepSizeFrozenPx = null; }, showTray: (v) => { showTray = v; },
   showDock: (v) => { showDock = v; if (macHideController) macHideController.noteManualChange(); }, manageClaudeHooksAutomatically: (v) => { manageClaudeHooksAutomatically = v; },
   autoStartWithClaude: (v) => { autoStartWithClaude = v; }, openAtLogin: (v) => { openAtLogin = v; },
   bubbleFollowPet: (v) => { bubbleFollowPet = v; }, sessionHudEnabled: (v) => { sessionHudEnabled = v; },
@@ -2845,7 +2858,7 @@ const SETTINGS_MIRROR_SETTERS = {
   detachedIdleStaleMs: (v) => { detachedIdleStaleMs = v; },
   soundMuted: (v) => { soundMuted = v; }, soundVolume: (v) => { soundVolume = v; }, lowPowerIdleMode: (v) => { lowPowerIdleMode = v; },
   keepAwakeWhileWorking: (v) => { keepAwakeWhileWorking = v; },
-  allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; },
+  allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; keepSizeFrozenPx = null; },
   textScale: (v) => { textScale = v; textScalePreview = null; },
   textScaleByDisplay: (v) => { textScaleByDisplay = v; textScalePreview = null; },
 };
@@ -3159,6 +3172,11 @@ function createWindow() {
   // keepSizeAcrossDisplays preserves the last realized pixel size across restarts.
   const proportionalSize = getCurrentPixelSize(launchSizingWorkArea);
   const size = getLaunchPixelSize(prefs, proportionalSize);
+  // #408: seed the in-memory frozen keep-size from the realized launch size, so
+  // display events reuse it instead of re-reading transiently-wrong live bounds.
+  if (keepSizeAcrossDisplaysCached && isProportionalMode()) {
+    keepSizeFrozenPx = { width: size.width, height: size.height };
+  }
 
   const {
     initialVirtualBounds,
@@ -3230,6 +3248,7 @@ function createWindow() {
     getPetWindowBounds: () => getPetWindowBounds(),
     getKeepSizeAcrossDisplays: () => keepSizeAcrossDisplaysCached,
     getCurrentPixelSize: () => getCurrentPixelSize(),
+    getEffectiveCurrentPixelSize: () => getEffectiveCurrentPixelSize(),
     computeDragEndBounds: (virtualBounds, size) =>
       computeFinalDragBounds(virtualBounds, size, clampToScreenVisual),
     applyPetWindowBounds: (bounds) => applyPetWindowBounds(bounds),

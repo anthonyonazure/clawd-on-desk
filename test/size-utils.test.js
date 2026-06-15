@@ -89,4 +89,42 @@ describe("size utils", () => {
       fallback,
     );
   });
+
+  it("clamps a saved keep-size bigger than its ORIGIN display back to proportional (#408)", () => {
+    const fallback = { width: 384, height: 384 };
+    // Corrupted: saved is taller than the display it was realized on
+    // (positionDisplay snapshot) — DPI round-trip growth, not a slider value.
+    assert.strictEqual(
+      getLaunchPixelSize(
+        {
+          keepSizeAcrossDisplays: true, size: "P:10",
+          savedPixelWidth: 2000, savedPixelHeight: 2000,
+          positionDisplay: { workArea: { x: 0, y: 0, width: 1920, height: 1080 } },
+        },
+        fallback,
+      ),
+      fallback,
+    );
+    // Legit cross-display: a size set on a 4K display is kept even though it
+    // exceeds a smaller launch display — that's the whole point of keep-size.
+    assert.deepStrictEqual(
+      getLaunchPixelSize(
+        {
+          keepSizeAcrossDisplays: true, size: "P:10",
+          savedPixelWidth: 1152, savedPixelHeight: 1152,
+          positionDisplay: { workArea: { x: 0, y: 0, width: 3840, height: 2160 } },
+        },
+        fallback,
+      ),
+      { width: 1152, height: 1152 },
+    );
+    // No origin snapshot → skip the clamp rather than risk healing a valid size.
+    assert.deepStrictEqual(
+      getLaunchPixelSize(
+        { keepSizeAcrossDisplays: true, size: "P:10", savedPixelWidth: 2000, savedPixelHeight: 2000 },
+        fallback,
+      ),
+      { width: 2000, height: 2000 },
+    );
+  });
 });

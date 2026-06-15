@@ -57,7 +57,23 @@ function getLaunchPixelSize(prefs, fallbackSize) {
   if (!prefs || !fallbackSize) return fallbackSize;
   if (!prefs.keepSizeAcrossDisplays) return fallbackSize;
   if (typeof prefs.size !== "string" || !prefs.size.startsWith("P:")) return fallbackSize;
-  return getSavedPixelSize(prefs) || fallbackSize;
+  const saved = getSavedPixelSize(prefs);
+  if (!saved) return fallbackSize;
+  // #408: a saved keep-size larger than the display it was REALIZED on can only
+  // be corrupted prefs (the DPI round-trip growth where setBounds(getBounds())
+  // ratchets the size up each sleep/wake). Compare against the origin display's
+  // work area (the positionDisplay snapshot), NOT the current launch display — a
+  // legit keep-size set on a large display may exceed a smaller launch display,
+  // and keeping it is the whole point of "keep size across displays". Without an
+  // origin snapshot we skip the check rather than risk healing a valid size.
+  const originWa = prefs.positionDisplay && prefs.positionDisplay.workArea;
+  if (originWa) {
+    const maxW = Number(originWa.width);
+    const maxH = Number(originWa.height);
+    if (Number.isFinite(maxW) && maxW > 0 && saved.width > maxW) return fallbackSize;
+    if (Number.isFinite(maxH) && maxH > 0 && saved.height > maxH) return fallbackSize;
+  }
+  return saved;
 }
 
 module.exports = {
