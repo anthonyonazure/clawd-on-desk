@@ -70,6 +70,7 @@ function createSettingsEffectRouter(options = {}) {
   const syncSessionHudVisibility = options.syncSessionHudVisibility || noop;
   const handleSessionHudPinnedChanged = options.handleSessionHudPinnedChanged || noop;
   const reclampPetAfterEdgePinningChange = options.reclampPetAfterEdgePinningChange || noop;
+  const reconcileCostHud = options.reconcileCostHud || noop;
   const exitMiniMode = options.exitMiniMode || noop;
   const getMiniMode = options.getMiniMode || (() => false);
   const rebuildAllMenus = options.rebuildAllMenus || noop;
@@ -104,6 +105,9 @@ function createSettingsEffectRouter(options = {}) {
     }
     if ("petTint" in changes) {
       sendToRenderer("set-pet-tint", changes.petTint);
+    }
+    if ("costHudEnabled" in changes) {
+      safeCall(logWarn, "Clawd: cost HUD reconcile failed:", reconcileCostHud);
     }
     if ("keepAwakeWhileWorking" in changes) {
       safeCall(logWarn, "Clawd: reconcilePowerSaveBlocker failed:", reconcilePowerSaveBlocker);

@@ -241,6 +241,9 @@ const SCHEMA = {
     default: "none",
     enum: ["none", "midnight", "gold", "vaporwave", "mono", "matcha"],
   },
+  // Show today's estimated Claude Code spend as a live line in the tray menu.
+  // Read-only readout; the dollar figure is an estimate (see cost-tracker.js).
+  costHudEnabled: { type: "boolean", default: true },
   // Phase 2/3 placeholders — schema reserves the keys so future migrations don't need v2.
   agents: {
     type: "object",

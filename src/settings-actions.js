@@ -227,6 +227,7 @@ const updateRegistry = {
   // updated by the settings-effect-router branches ("set-accessory"/"set-pet-tint").
   accessory: requireEnum("accessory", ["none", "cowboy-hat", "party-hat", "wizard-hat", "top-hat", "santa-hat", "pumpkin-hat", "halo", "seasonal"]),
   petTint: requireEnum("petTint", ["none", "midnight", "gold", "vaporwave", "mono", "matcha"]),
+  costHudEnabled: requireBoolean("costHudEnabled"),
   bubbleFollowPet: requireBoolean("bubbleFollowPet"),
   sessionHudEnabled: requireBoolean("sessionHudEnabled"),
   sessionHudShowStateLabels: requireBoolean("sessionHudShowStateLabels"),

@@ -172,6 +172,25 @@ module.exports = function initMenu(ctx) {
     };
   }
 
+  // Today's Claude spend: a live (disabled) readout plus a show/hide toggle.
+  // The dollar figure is an estimate computed by cost-tracker.js (main caches it).
+  function buildCostMenuGroup() {
+    const group = [];
+    if (ctx.costHudEnabled) {
+      const value = (typeof ctx.hasTodayCost === "function" && ctx.hasTodayCost())
+        ? ctx.getTodayCostText()
+        : "…";
+      group.push({ label: `💰 ${t("costToday")}: ${value}`, enabled: false });
+    }
+    group.push({
+      label: t("costShow"),
+      type: "checkbox",
+      checked: ctx.costHudEnabled,
+      click: (menuItem) => { ctx.costHudEnabled = menuItem.checked; },
+    });
+    return group;
+  }
+
   function buildBringToPrimaryDisplayMenuItem() {
     return {
       label: t("bringPetToPrimaryDisplay"),
@@ -320,7 +339,7 @@ module.exports = function initMenu(ctx) {
       { label: t("quit"), click: () => requestAppQuit() },
     ];
 
-    const items = joinGroups([stateGroup, noiseGroup, workGroup, systemGroup, appGroup, quitGroup]);
+    const items = joinGroups([stateGroup, noiseGroup, workGroup, buildCostMenuGroup(), systemGroup, appGroup, quitGroup]);
     ctx.tray.setContextMenu(Menu.buildFromTemplate(items));
   }
 

@@ -81,6 +81,7 @@ const {
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
 const createSettingsEffectRouter = require("./settings-effect-router");
+const costTracker = require("./cost-tracker");
 const { registerSessionIpc } = require("./session-ipc");
 const { registerPetInteractionIpc } = require("./pet-interaction-ipc");
 const { launchClaudeSession, openTerminalAt } = require("./launch-claude");
@@ -781,7 +782,35 @@ let lowPowerIdleMode = _settingsController.get("lowPowerIdleMode");
 let keepAwakeWhileWorking = _settingsController.get("keepAwakeWhileWorking");
 let accessory = _settingsController.get("accessory");
 let petTint = _settingsController.get("petTint");
+let costHudEnabled = _settingsController.get("costHudEnabled");
 let allowEdgePinningCached = _settingsController.get("allowEdgePinning");
+
+// ── Today's Claude spend (cost tracker) ──
+// Cached result of the last transcript scan; the tray menu reads it. Refreshed
+// on a timer + immediately when the readout is toggled on. Scan is filesystem
+// work, so it never runs on the render hot path.
+let _todayCost = null;
+let _costPollTimer = null;
+function refreshTodayCost() {
+  if (!costHudEnabled) return;
+  try { _todayCost = costTracker.computeTodayCost(); } catch (err) {
+    console.warn("Clawd: cost scan failed:", err && err.message);
+  }
+  try { rebuildAllMenus(); } catch {}
+}
+function reconcileCostHud() {
+  if (costHudEnabled) {
+    refreshTodayCost();
+    if (!_costPollTimer) {
+      _costPollTimer = setInterval(refreshTodayCost, 180_000);
+      if (_costPollTimer.unref) _costPollTimer.unref();
+    }
+  } else {
+    if (_costPollTimer) { clearInterval(_costPollTimer); _costPollTimer = null; }
+    _todayCost = null;
+    try { rebuildAllMenus(); } catch {}
+  }
+}
 let disableMiniModeCached = _settingsController.get("disableMiniMode");
 let keepSizeAcrossDisplaysCached = _settingsController.get("keepSizeAcrossDisplays");
 let textScale = _settingsController.get("textScale");
@@ -2840,6 +2869,10 @@ const _menuCtx = {
   set accessory(v) { _settingsController.applyUpdate("accessory", v); },
   get petTint() { return petTint; },
   set petTint(v) { _settingsController.applyUpdate("petTint", v); },
+  get costHudEnabled() { return costHudEnabled; },
+  set costHudEnabled(v) { _settingsController.applyUpdate("costHudEnabled", v); },
+  getTodayCostText() { return costTracker.formatUsd(_todayCost ? _todayCost.usd : 0); },
+  hasTodayCost() { return _todayCost != null; },
   get soundVolume() { return soundVolume; },
   get pendingPermissions() { return pendingPermissions; },
   repositionBubbles: () => repositionFloatingBubbles(),
@@ -2985,6 +3018,7 @@ const SETTINGS_MIRROR_SETTERS = {
   keepAwakeWhileWorking: (v) => { keepAwakeWhileWorking = v; },
   accessory: (v) => { accessory = v; },
   petTint: (v) => { petTint = v; },
+  costHudEnabled: (v) => { costHudEnabled = v; },
   allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; },
   freeRoam: (v) => { _roam.setEnabled(v); },
   textScale: (v) => { textScale = v; textScalePreview = null; },
@@ -3035,6 +3069,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
   getMiniMode: () => _mini.getMiniMode(),
   rebuildAllMenus,
   reconcilePowerSaveBlocker,
+  reconcileCostHud,
   logWarn: console.warn,
 });
 settingsEffectRouter.start();
@@ -3412,6 +3447,8 @@ function createWindow() {
   startHttpServer();
   if (_settingsController.get("mobilePreviewEnabled") === true) _lanWss.start();
   startStaleCleanup();
+  // Today's-spend readout: initial scan + start the refresh timer if enabled.
+  reconcileCostHud();
   // Wait for renderer to be ready before sending initial state
   // If hooks arrived during startup, respect them instead of forcing idle
   // Also handles crash recovery (render-process-gone → reload)
