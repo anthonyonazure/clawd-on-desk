@@ -27,7 +27,13 @@
     "centerX": 7.5,
     "baselineY": 17,
     "visibleHeightRatio": 0.58,
-    "baselineBottomRatio": 0.05
+    "baselineBottomRatio": 0.05,
+    "headAnchor": {
+      "left": 50,
+      "top": 31,
+      "width": 44,
+      "rotate": 0
+    }
   },
   "eyeTracking": {
     "enabled": true,

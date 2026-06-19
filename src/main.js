@@ -779,6 +779,7 @@ let soundMuted = _settingsController.get("soundMuted");
 let soundVolume = _settingsController.get("soundVolume");
 let lowPowerIdleMode = _settingsController.get("lowPowerIdleMode");
 let keepAwakeWhileWorking = _settingsController.get("keepAwakeWhileWorking");
+let accessory = _settingsController.get("accessory");
 let allowEdgePinningCached = _settingsController.get("allowEdgePinning");
 let disableMiniModeCached = _settingsController.get("disableMiniMode");
 let keepSizeAcrossDisplaysCached = _settingsController.get("keepSizeAcrossDisplays");
@@ -2834,6 +2835,8 @@ const _menuCtx = {
   },
   get soundMuted() { return soundMuted; },
   set soundMuted(v) { _settingsController.applyUpdate("soundMuted", v); },
+  get accessory() { return accessory; },
+  set accessory(v) { _settingsController.applyUpdate("accessory", v); },
   get soundVolume() { return soundVolume; },
   get pendingPermissions() { return pendingPermissions; },
   repositionBubbles: () => repositionFloatingBubbles(),
@@ -2977,6 +2980,7 @@ const SETTINGS_MIRROR_SETTERS = {
   detachedIdleStaleMs: (v) => { detachedIdleStaleMs = v; },
   soundMuted: (v) => { soundMuted = v; }, soundVolume: (v) => { soundVolume = v; }, lowPowerIdleMode: (v) => { lowPowerIdleMode = v; },
   keepAwakeWhileWorking: (v) => { keepAwakeWhileWorking = v; },
+  accessory: (v) => { accessory = v; },
   allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; },
   freeRoam: (v) => { _roam.setEnabled(v); },
   textScale: (v) => { textScale = v; textScalePreview = null; },
@@ -3413,6 +3417,9 @@ function createWindow() {
   win.webContents.on("did-finish-load", () => {
     sendToRenderer("theme-config", themeRuntime.getRendererConfig());
     sendToRenderer("viewport-offset", petWindowRuntime.getViewportOffsetY());
+    // Re-assert the worn accessory after every (re)load, including theme
+    // hot-switch reloads — the renderer rebuilds its overlay from scratch.
+    sendToRenderer("set-accessory", accessory);
     if (themeRuntime.isReloadInProgress()) return;
     syncRendererStateAfterLoad();
   });

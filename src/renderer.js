@@ -396,11 +396,69 @@ window.electronAPI.onThemeConfig((newConfig) => {
   // Clean up layered tracking before reinitializing
   _cleanupLayeredTracking();
   initWithConfig(newConfig);
+  // Re-anchor the worn accessory to the new theme's headAnchor.
+  applyAccessory();
 });
 
 window.electronAPI.onViewportOffset((offsetY) => {
   setViewportOffset(offsetY);
 });
+
+// ── Cosmetic accessory overlay ──
+// A sibling layer over the pet, anchored to the head via theme layout.headAnchor.
+// It lives in #pet-container (so it inherits the mini-left scaleX flip) and is
+// independent of the pet's <object>/<img> render channel — so a worn hat shows
+// across every state and theme. Position is container-relative percentages;
+// fine-tuned per theme in theme.json under layout.headAnchor.
+const ACCESSORY_ASSETS = {
+  "cowboy-hat": "../assets/accessories/cowboy-hat.svg",
+};
+const DEFAULT_HEAD_ANCHOR = { left: 50, top: 30, width: 46, rotate: 0 };
+let _accessoryId = "none";
+let _accessoryEl = null;
+let _accessoryCacheBust = 0;
+
+function ensureAccessoryEl() {
+  if (_accessoryEl) return _accessoryEl;
+  const el = document.createElement("img");
+  el.id = "clawd-accessory";
+  el.draggable = false;
+  el.alt = "";
+  container.appendChild(el);
+  _accessoryEl = el;
+  return el;
+}
+
+function applyAccessory() {
+  const src = ACCESSORY_ASSETS[_accessoryId];
+  if (!src) {
+    if (_accessoryEl) _accessoryEl.style.display = "none";
+    return;
+  }
+  const el = ensureAccessoryEl();
+  const a = (_layout && _layout.headAnchor) || DEFAULT_HEAD_ANCHOR;
+  const left = Number.isFinite(a.left) ? a.left : DEFAULT_HEAD_ANCHOR.left;
+  const top = Number.isFinite(a.top) ? a.top : DEFAULT_HEAD_ANCHOR.top;
+  const width = Number.isFinite(a.width) ? a.width : DEFAULT_HEAD_ANCHOR.width;
+  const rotate = Number.isFinite(a.rotate) ? a.rotate : 0;
+  // Cache-bust: Chromium reuses same-URL SVG docs, so a re-show would otherwise
+  // keep a stale frame (same gotcha as the state <img> ?_t= bust).
+  el.src = src + "?_t=" + (++_accessoryCacheBust);
+  el.style.left = left + "%";
+  el.style.top = top + "%";
+  el.style.width = width + "%";
+  el.style.transform = `translate(-50%, -50%) rotate(${rotate}deg)`;
+  el.style.display = "block";
+}
+
+function setAccessory(id) {
+  _accessoryId = (typeof id === "string" && ACCESSORY_ASSETS[id]) ? id : "none";
+  applyAccessory();
+}
+
+if (window.electronAPI && typeof window.electronAPI.onSetAccessory === "function") {
+  window.electronAPI.onSetAccessory(setAccessory);
+}
 
 // Release an <object> SVG element: navigate away to unload the SVG document
 // (stops CSS animations and frees the internal frame), then remove from DOM.

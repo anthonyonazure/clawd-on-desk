@@ -99,6 +99,9 @@ function createSettingsEffectRouter(options = {}) {
     if ("lowPowerIdleMode" in changes) {
       sendToRenderer("low-power-idle-mode-change", changes.lowPowerIdleMode);
     }
+    if ("accessory" in changes) {
+      sendToRenderer("set-accessory", changes.accessory);
+    }
     if ("keepAwakeWhileWorking" in changes) {
       safeCall(logWarn, "Clawd: reconcilePowerSaveBlocker failed:", reconcilePowerSaveBlocker);
     }

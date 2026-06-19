@@ -224,6 +224,12 @@ const SCHEMA = {
   },
   // Theme
   theme: { type: "string", default: "clawd" },
+  // Cosmetic accessory worn by the pet ("none" = bare). Rendered as a sibling
+  // overlay layer anchored to the head via the theme's layout.headAnchor, so it
+  // works across every state/theme regardless of the SVG/img render channel.
+  // New wardrobe items: add the id here, in settings-actions' validator, the
+  // renderer's ACCESSORY_ASSETS map, and the menu's accessory submenu.
+  accessory: { type: "string", default: "none", enum: ["none", "cowboy-hat"] },
   // Phase 2/3 placeholders — schema reserves the keys so future migrations don't need v2.
   agents: {
     type: "object",

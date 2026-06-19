@@ -223,6 +223,9 @@ const updateRegistry = {
   flashDurationMs: requireNumberInRange("flashDurationMs", 0, 60000),
   lowPowerIdleMode: requireBoolean("lowPowerIdleMode"),
   keepAwakeWhileWorking: requireBoolean("keepAwakeWhileWorking"),
+  // Cosmetic accessory — pure data, no effect. The renderer is updated by the
+  // settings-effect-router "accessory" branch (sends "set-accessory").
+  accessory: requireEnum("accessory", ["none", "cowboy-hat"]),
   bubbleFollowPet: requireBoolean("bubbleFollowPet"),
   sessionHudEnabled: requireBoolean("sessionHudEnabled"),
   sessionHudShowStateLabels: requireBoolean("sessionHudShowStateLabels"),
