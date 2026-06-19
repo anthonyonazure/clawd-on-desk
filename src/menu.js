@@ -268,6 +268,12 @@ module.exports = function initMenu(ctx) {
         checked: !ctx.soundMuted,
         click: (menuItem) => { ctx.soundMuted = !menuItem.checked; },
       },
+      {
+        label: t("testReactions"),
+        type: "checkbox",
+        checked: ctx.testReactionsEnabled,
+        click: (menuItem) => { ctx.testReactionsEnabled = menuItem.checked; },
+      },
       buildAccessoryMenuItem(),
       buildPetTintMenuItem(),
     ];

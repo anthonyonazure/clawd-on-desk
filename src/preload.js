@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onSetAccessory: (cb) => ipcRenderer.on("set-accessory", (_, id) => cb(id)),
   // Pet color tint ("none" | "midnight" | …) — pushed on load + on change
   onSetPetTint: (cb) => ipcRenderer.on("set-pet-tint", (_, id) => cb(id)),
+  // One-shot test-result reaction ("pass" | "fail") — confetti / shake
+  onPlayTestReaction: (cb) => ipcRenderer.on("play-test-reaction", (_, result) => cb(result)),
   // State sync from main
   onStateChange: (callback) => ipcRenderer.on("state-change", (_, state, svg) => callback(state, svg)),
   onKimiPermissionPulse: (callback) => ipcRenderer.on("kimi-permission-pulse", () => callback()),

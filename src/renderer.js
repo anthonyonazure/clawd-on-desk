@@ -528,6 +528,48 @@ if (window.electronAPI && typeof window.electronAPI.onSetPetTint === "function")
   window.electronAPI.onSetPetTint(setPetTint);
 }
 
+// ── Test-result reactions ──
+// One-shot, theme-agnostic delight when a test command finishes: a confetti
+// burst over the pet on pass, a quick shake on fail. Pure DOM/CSS — no
+// dependency on per-theme reaction SVGs. Triggered by main via IPC.
+const CONFETTI_COLORS = ["#ff5d8f", "#ffd166", "#4ec3e0", "#8a5cff", "#5ad17a"];
+
+function burstConfetti() {
+  const n = 18;
+  for (let i = 0; i < n; i++) {
+    const p = document.createElement("div");
+    p.className = "clawd-confetti";
+    const startX = 30 + Math.floor((i / n) * 40); // spread across the head
+    const dx = (i % 2 === 0 ? 1 : -1) * (10 + (i * 7) % 60);
+    const delay = (i % 6) * 40;
+    p.style.left = startX + "%";
+    p.style.background = CONFETTI_COLORS[i % CONFETTI_COLORS.length];
+    p.style.setProperty("--dx", dx + "px");
+    p.style.animationDelay = delay + "ms";
+    container.appendChild(p);
+    // Remove after the animation (1.2s + max delay) to avoid DOM buildup.
+    setTimeout(() => { try { p.remove(); } catch {} }, 1500 + delay);
+  }
+}
+
+function shakePet() {
+  const target = container;
+  target.classList.remove("clawd-shake");
+  // Force reflow so re-adding the class restarts the animation.
+  void target.offsetWidth;
+  target.classList.add("clawd-shake");
+  setTimeout(() => { try { target.classList.remove("clawd-shake"); } catch {} }, 650);
+}
+
+function playTestReaction(result) {
+  if (result === "pass") burstConfetti();
+  else if (result === "fail") shakePet();
+}
+
+if (window.electronAPI && typeof window.electronAPI.onPlayTestReaction === "function") {
+  window.electronAPI.onPlayTestReaction(playTestReaction);
+}
+
 // Release an <object> SVG element: navigate away to unload the SVG document
 // (stops CSS animations and frees the internal frame), then remove from DOM.
 function releaseObject(el) {

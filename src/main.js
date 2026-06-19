@@ -783,7 +783,17 @@ let keepAwakeWhileWorking = _settingsController.get("keepAwakeWhileWorking");
 let accessory = _settingsController.get("accessory");
 let petTint = _settingsController.get("petTint");
 let costHudEnabled = _settingsController.get("costHudEnabled");
+let testReactionsEnabled = _settingsController.get("testReactionsEnabled");
 let allowEdgePinningCached = _settingsController.get("allowEdgePinning");
+
+// Test-result reactions: the hook tags a PostToolUse(Bash test command) with
+// test_result pass/fail; the server relays it here. We forward a one-shot
+// confetti (pass) / shake (fail) to the pet renderer. Gated by a pref.
+function handleTestResult(result) {
+  if (!testReactionsEnabled) return;
+  if (result !== "pass" && result !== "fail") return;
+  try { sendToRenderer("play-test-reaction", result); } catch {}
+}
 
 // ── Today's Claude spend (cost tracker) ──
 // Cached result of the last transcript scan; the tray menu reads it. Refreshed
@@ -1803,6 +1813,7 @@ const _serverCtx = {
   codexSubagentClassifier: agentRuntime.getCodexSubagentClassifier(),
   setState,
   updateSession: agentRuntime.updateSessionFromServer,
+  onTestResult: (result) => handleTestResult(result),
   resolvePermissionEntry,
   sendPermissionResponse,
   addPendingPermission,
@@ -2871,6 +2882,8 @@ const _menuCtx = {
   set petTint(v) { _settingsController.applyUpdate("petTint", v); },
   get costHudEnabled() { return costHudEnabled; },
   set costHudEnabled(v) { _settingsController.applyUpdate("costHudEnabled", v); },
+  get testReactionsEnabled() { return testReactionsEnabled; },
+  set testReactionsEnabled(v) { _settingsController.applyUpdate("testReactionsEnabled", v); },
   getTodayCostText() { return costTracker.formatUsd(_todayCost ? _todayCost.usd : 0); },
   hasTodayCost() { return _todayCost != null; },
   get soundVolume() { return soundVolume; },
@@ -3019,6 +3032,7 @@ const SETTINGS_MIRROR_SETTERS = {
   accessory: (v) => { accessory = v; },
   petTint: (v) => { petTint = v; },
   costHudEnabled: (v) => { costHudEnabled = v; },
+  testReactionsEnabled: (v) => { testReactionsEnabled = v; },
   allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; },
   freeRoam: (v) => { _roam.setEnabled(v); },
   textScale: (v) => { textScale = v; textScalePreview = null; },

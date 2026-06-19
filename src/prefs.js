@@ -244,6 +244,9 @@ const SCHEMA = {
   // Show today's estimated Claude Code spend as a live line in the tray menu.
   // Read-only readout; the dollar figure is an estimate (see cost-tracker.js).
   costHudEnabled: { type: "boolean", default: true },
+  // Play a one-shot reaction (confetti on pass / shake on fail) when a test
+  // command finishes, detected from the Claude Code PostToolUse hook.
+  testReactionsEnabled: { type: "boolean", default: true },
   // Phase 2/3 placeholders — schema reserves the keys so future migrations don't need v2.
   agents: {
     type: "object",

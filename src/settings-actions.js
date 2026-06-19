@@ -228,6 +228,7 @@ const updateRegistry = {
   accessory: requireEnum("accessory", ["none", "cowboy-hat", "party-hat", "wizard-hat", "top-hat", "santa-hat", "pumpkin-hat", "halo", "seasonal"]),
   petTint: requireEnum("petTint", ["none", "midnight", "gold", "vaporwave", "mono", "matcha"]),
   costHudEnabled: requireBoolean("costHudEnabled"),
+  testReactionsEnabled: requireBoolean("testReactionsEnabled"),
   bubbleFollowPet: requireBoolean("bubbleFollowPet"),
   sessionHudEnabled: requireBoolean("sessionHudEnabled"),
   sessionHudShowStateLabels: requireBoolean("sessionHudShowStateLabels"),
