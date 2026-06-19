@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Top hat accessory. Brim rests at viewBox bottom (bottom-anchored). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 150" width="160" height="150">
+  <!-- Brim -->
+  <ellipse cx="80" cy="132" rx="74" ry="14" fill="#1c1c22" stroke="#000000" stroke-width="3"/>
+  <!-- Crown -->
+  <rect x="42" y="24" width="76" height="106" fill="#26262e" stroke="#000000" stroke-width="3"/>
+  <ellipse cx="80" cy="24" rx="38" ry="9" fill="#33333d" stroke="#000000" stroke-width="3"/>
+  <!-- Band -->
+  <rect x="42" y="104" width="76" height="16" fill="#b03a3a"/>
+</svg>

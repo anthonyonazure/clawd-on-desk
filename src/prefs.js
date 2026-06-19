@@ -229,7 +229,18 @@ const SCHEMA = {
   // works across every state/theme regardless of the SVG/img render channel.
   // New wardrobe items: add the id here, in settings-actions' validator, the
   // renderer's ACCESSORY_ASSETS map, and the menu's accessory submenu.
-  accessory: { type: "string", default: "none", enum: ["none", "cowboy-hat"] },
+  accessory: {
+    type: "string",
+    default: "none",
+    enum: ["none", "cowboy-hat", "party-hat", "wizard-hat", "top-hat", "santa-hat", "pumpkin-hat", "halo", "seasonal"],
+  },
+  // Pet color tint — a CSS filter applied to the pet sprite (not the accessory).
+  // "none" = the theme's native colors. Palette swaps without new art.
+  petTint: {
+    type: "string",
+    default: "none",
+    enum: ["none", "midnight", "gold", "vaporwave", "mono", "matcha"],
+  },
   // Phase 2/3 placeholders — schema reserves the keys so future migrations don't need v2.
   agents: {
     type: "object",

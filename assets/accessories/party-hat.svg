@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Party hat accessory. Cone base rests at viewBox bottom (bottom-anchored). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 180" width="160" height="180">
+  <defs>
+    <clipPath id="party-cone"><polygon points="34,172 126,172 80,18"/></clipPath>
+  </defs>
+  <g clip-path="url(#party-cone)">
+    <rect x="20" y="0" width="120" height="180" fill="#ff5d8f"/>
+    <polygon points="0,40 160,150 160,120 0,10" fill="#ffd166"/>
+    <polygon points="0,95 160,205 160,175 0,65" fill="#4ec3e0"/>
+    <polygon points="0,150 160,260 160,230 0,120" fill="#8a5cff"/>
+  </g>
+  <polygon points="34,172 126,172 80,18" fill="none" stroke="#2c1a3a" stroke-width="4" stroke-linejoin="round"/>
+  <!-- Pompom -->
+  <circle cx="80" cy="16" r="15" fill="#ffd166" stroke="#2c1a3a" stroke-width="4"/>
+</svg>

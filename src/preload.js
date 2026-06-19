@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   onViewportOffset: (cb) => ipcRenderer.on("viewport-offset", (_, offsetY) => cb(offsetY)),
   // Cosmetic accessory ("none" | "cowboy-hat" | …) — pushed on load + on change
   onSetAccessory: (cb) => ipcRenderer.on("set-accessory", (_, id) => cb(id)),
+  // Pet color tint ("none" | "midnight" | …) — pushed on load + on change
+  onSetPetTint: (cb) => ipcRenderer.on("set-pet-tint", (_, id) => cb(id)),
   // State sync from main
   onStateChange: (callback) => ipcRenderer.on("state-change", (_, state, svg) => callback(state, svg)),
   onKimiPermissionPulse: (callback) => ipcRenderer.on("kimi-permission-pulse", () => callback()),

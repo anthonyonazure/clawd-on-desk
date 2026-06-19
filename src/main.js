@@ -780,6 +780,7 @@ let soundVolume = _settingsController.get("soundVolume");
 let lowPowerIdleMode = _settingsController.get("lowPowerIdleMode");
 let keepAwakeWhileWorking = _settingsController.get("keepAwakeWhileWorking");
 let accessory = _settingsController.get("accessory");
+let petTint = _settingsController.get("petTint");
 let allowEdgePinningCached = _settingsController.get("allowEdgePinning");
 let disableMiniModeCached = _settingsController.get("disableMiniMode");
 let keepSizeAcrossDisplaysCached = _settingsController.get("keepSizeAcrossDisplays");
@@ -2837,6 +2838,8 @@ const _menuCtx = {
   set soundMuted(v) { _settingsController.applyUpdate("soundMuted", v); },
   get accessory() { return accessory; },
   set accessory(v) { _settingsController.applyUpdate("accessory", v); },
+  get petTint() { return petTint; },
+  set petTint(v) { _settingsController.applyUpdate("petTint", v); },
   get soundVolume() { return soundVolume; },
   get pendingPermissions() { return pendingPermissions; },
   repositionBubbles: () => repositionFloatingBubbles(),
@@ -2981,6 +2984,7 @@ const SETTINGS_MIRROR_SETTERS = {
   soundMuted: (v) => { soundMuted = v; }, soundVolume: (v) => { soundVolume = v; }, lowPowerIdleMode: (v) => { lowPowerIdleMode = v; },
   keepAwakeWhileWorking: (v) => { keepAwakeWhileWorking = v; },
   accessory: (v) => { accessory = v; },
+  petTint: (v) => { petTint = v; },
   allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; },
   freeRoam: (v) => { _roam.setEnabled(v); },
   textScale: (v) => { textScale = v; textScalePreview = null; },
@@ -3417,9 +3421,10 @@ function createWindow() {
   win.webContents.on("did-finish-load", () => {
     sendToRenderer("theme-config", themeRuntime.getRendererConfig());
     sendToRenderer("viewport-offset", petWindowRuntime.getViewportOffsetY());
-    // Re-assert the worn accessory after every (re)load, including theme
-    // hot-switch reloads — the renderer rebuilds its overlay from scratch.
+    // Re-assert the worn accessory + pet tint after every (re)load, including
+    // theme hot-switch reloads — the renderer rebuilds its overlay from scratch.
     sendToRenderer("set-accessory", accessory);
+    sendToRenderer("set-pet-tint", petTint);
     if (themeRuntime.isReloadInProgress()) return;
     syncRendererStateAfterLoad();
   });

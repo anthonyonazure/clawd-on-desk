@@ -27,6 +27,24 @@ const SIZES = {
 const ACCESSORIES = [
   { id: "none", labelKey: "accessoryNone" },
   { id: "cowboy-hat", labelKey: "accessoryCowboyHat" },
+  { id: "party-hat", labelKey: "accessoryPartyHat" },
+  { id: "wizard-hat", labelKey: "accessoryWizardHat" },
+  { id: "top-hat", labelKey: "accessoryTopHat" },
+  { id: "santa-hat", labelKey: "accessorySantaHat" },
+  { id: "pumpkin-hat", labelKey: "accessoryPumpkinHat" },
+  { id: "halo", labelKey: "accessoryHalo" },
+  { id: "seasonal", labelKey: "accessorySeasonal" },
+];
+
+// ── Pet color tints (palette swaps) ──
+// id must match the prefs `petTint` enum + the renderer's TINT_FILTERS map.
+const PET_TINTS = [
+  { id: "none", labelKey: "tintNone" },
+  { id: "midnight", labelKey: "tintMidnight" },
+  { id: "gold", labelKey: "tintGold" },
+  { id: "vaporwave", labelKey: "tintVaporwave" },
+  { id: "matcha", labelKey: "tintMatcha" },
+  { id: "mono", labelKey: "tintMono" },
 ];
 
 // i18n string pool + translator factory live in src/i18n.js so the future
@@ -139,6 +157,21 @@ module.exports = function initMenu(ctx) {
     };
   }
 
+  // Pet color submenu: radio list of palette tints. Writing ctx.petTint routes
+  // through the settings controller (persist + broadcast "set-pet-tint").
+  function buildPetTintMenuItem() {
+    const current = ctx.petTint;
+    return {
+      label: t("petColor"),
+      submenu: PET_TINTS.map((p) => ({
+        label: t(p.labelKey),
+        type: "radio",
+        checked: current === p.id,
+        click: () => { ctx.petTint = p.id; },
+      })),
+    };
+  }
+
   function buildBringToPrimaryDisplayMenuItem() {
     return {
       label: t("bringPetToPrimaryDisplay"),
@@ -217,6 +250,7 @@ module.exports = function initMenu(ctx) {
         click: (menuItem) => { ctx.soundMuted = !menuItem.checked; },
       },
       buildAccessoryMenuItem(),
+      buildPetTintMenuItem(),
     ];
 
     // Dashboard + the danger auto-approve toggle (danger last, as in the
@@ -459,6 +493,7 @@ module.exports = function initMenu(ctx) {
         ],
       },
       buildAccessoryMenuItem(),
+      buildPetTintMenuItem(),
       // Danger auto-approve sits at the tail of the work group: it governs how
       // agent permission requests are handled, and keeping it here (rather than
       // near the top) makes it harder to hit by accident.

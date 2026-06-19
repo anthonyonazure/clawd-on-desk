@@ -102,6 +102,9 @@ function createSettingsEffectRouter(options = {}) {
     if ("accessory" in changes) {
       sendToRenderer("set-accessory", changes.accessory);
     }
+    if ("petTint" in changes) {
+      sendToRenderer("set-pet-tint", changes.petTint);
+    }
     if ("keepAwakeWhileWorking" in changes) {
       safeCall(logWarn, "Clawd: reconcilePowerSaveBlocker failed:", reconcilePowerSaveBlocker);
     }
