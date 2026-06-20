@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Halo accessory. Floats above the head; renderer lifts it via a negative dy. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 80" width="160" height="80">
-  <defs>
-    <radialGradient id="halo-glow" cx="50%" cy="55%" r="55%">
-      <stop offset="60%" stop-color="#fff6c0" stop-opacity="0"/>
-      <stop offset="100%" stop-color="#ffe066" stop-opacity="0.55"/>
-    </radialGradient>
-  </defs>
-  <ellipse cx="80" cy="46" rx="66" ry="24" fill="url(#halo-glow)"/>
-  <ellipse cx="80" cy="46" rx="58" ry="18" fill="none" stroke="#ffd84d" stroke-width="9"/>
-  <ellipse cx="80" cy="46" rx="58" ry="18" fill="none" stroke="#fff3b0" stroke-width="3"/>
+<!-- Halo — pixel art (14x5 grid). Blocky golden ring. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 5" shape-rendering="crispEdges" width="14" height="5">
+  <g fill="#ffd84d">
+    <rect x="4" y="0" width="6" height="1"/>
+    <rect x="2" y="1" width="2" height="1"/>
+    <rect x="10" y="1" width="2" height="1"/>
+    <rect x="1" y="2" width="1" height="1"/>
+    <rect x="12" y="2" width="1" height="1"/>
+    <rect x="2" y="3" width="2" height="1"/>
+    <rect x="10" y="3" width="2" height="1"/>
+    <rect x="4" y="4" width="6" height="1"/>
+  </g>
+  <!-- Top highlight -->
+  <rect x="4" y="0" width="6" height="1" fill="#fff3b0"/>
 </svg>

@@ -1,14 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Wizard hat accessory. Brim rests at viewBox bottom (bottom-anchored). -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 170 200" width="170" height="200">
+<!-- Wizard hat — pixel art (15x16 grid). Tall cone, brim, stars. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 15 16" shape-rendering="crispEdges" width="15" height="16">
+  <g fill="#4b3da0">
+    <rect x="7" y="0" width="1" height="1"/>
+    <rect x="7" y="1" width="1" height="1"/>
+    <rect x="6" y="2" width="3" height="1"/>
+    <rect x="6" y="3" width="3" height="1"/>
+    <rect x="6" y="4" width="3" height="1"/>
+    <rect x="5" y="5" width="5" height="1"/>
+    <rect x="5" y="6" width="5" height="1"/>
+    <rect x="5" y="7" width="5" height="1"/>
+    <rect x="4" y="8" width="7" height="1"/>
+    <rect x="4" y="9" width="7" height="1"/>
+    <rect x="4" y="10" width="7" height="1"/>
+    <rect x="3" y="11" width="9" height="1"/>
+    <rect x="3" y="12" width="9" height="1"/>
+    <rect x="3" y="13" width="9" height="1"/>
+  </g>
   <!-- Brim -->
-  <ellipse cx="85" cy="180" rx="80" ry="16" fill="#3a2d6b" stroke="#211a40" stroke-width="4"/>
-  <!-- Cone (slight bend at tip) -->
-  <path d="M44,182 Q40,90 70,40 Q90,8 120,30 Q96,70 96,120 Q96,160 126,182 Z"
-        fill="#4b3da0" stroke="#211a40" stroke-width="4" stroke-linejoin="round"/>
+  <rect x="0" y="14" width="15" height="1" fill="#2f2566"/>
+  <rect x="1" y="15" width="13" height="1" fill="#2f2566"/>
   <!-- Stars -->
   <g fill="#ffd84d">
-    <polygon points="80,70 84,80 95,80 86,87 89,98 80,91 71,98 74,87 65,80 76,80"/>
-    <polygon points="98,120 101,127 109,127 102,132 105,140 98,135 91,140 94,132 87,127 95,127"/>
+    <rect x="7" y="5" width="1" height="1"/>
+    <rect x="6" y="9" width="1" height="1"/>
+    <rect x="9" y="11" width="1" height="1"/>
   </g>
 </svg>

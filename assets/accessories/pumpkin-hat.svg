@@ -1,18 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Pumpkin hat accessory (seasonal: October). Pumpkin base rests at viewBox bottom. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 150 130" width="150" height="130">
+<!-- Pumpkin hat — pixel art (13x9 grid). Jack-o'-lantern with stem + face. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 13 9" shape-rendering="crispEdges" width="13" height="9">
   <!-- Stem -->
-  <rect x="68" y="6" width="14" height="22" rx="4" fill="#5c8a32" stroke="#3f5f22" stroke-width="3"/>
-  <!-- Pumpkin body (overlapping lobes) -->
-  <g fill="#ef8a26" stroke="#b85f12" stroke-width="3">
-    <ellipse cx="75" cy="78" rx="62" ry="46"/>
-    <ellipse cx="50" cy="78" rx="34" ry="46"/>
-    <ellipse cx="100" cy="78" rx="34" ry="46"/>
+  <rect x="6" y="0" width="1" height="2" fill="#5c8a32"/>
+  <!-- Pumpkin body -->
+  <g fill="#ef8a26">
+    <rect x="3" y="2" width="7" height="1"/>
+    <rect x="1" y="3" width="11" height="1"/>
+    <rect x="0" y="4" width="13" height="1"/>
+    <rect x="0" y="5" width="13" height="1"/>
+    <rect x="0" y="6" width="13" height="1"/>
+    <rect x="1" y="7" width="11" height="1"/>
+    <rect x="3" y="8" width="7" height="1"/>
+  </g>
+  <!-- Rib shading -->
+  <g fill="#c66a14">
+    <rect x="3" y="4" width="1" height="3"/>
+    <rect x="9" y="4" width="1" height="3"/>
   </g>
   <!-- Jack-o'-lantern face -->
   <g fill="#3a2410">
-    <polygon points="48,64 64,64 56,80"/>
-    <polygon points="86,64 102,64 94,80"/>
-    <path d="M40,94 q10,12 22,4 q13,12 26,2 q12,10 22,-2 q-8,22 -36,22 q-26,0 -34,-26 Z"/>
+    <rect x="3" y="4" width="2" height="1"/>
+    <rect x="8" y="4" width="2" height="1"/>
+    <rect x="2" y="6" width="2" height="1"/>
+    <rect x="5" y="6" width="1" height="1"/>
+    <rect x="7" y="6" width="1" height="1"/>
+    <rect x="9" y="6" width="2" height="1"/>
   </g>
 </svg>
