@@ -47,20 +47,6 @@ html, body {
   pointer-events: none;
 }
 
-/* ── Cosmetic accessory overlay ──
-   A sibling layer painted over the pet, anchored to the head. left/top/width
-   and the rotate transform are set inline by renderer.js from the active
-   theme's layout.headAnchor; this rule only carries the static base.
-   Lives inside #pet-container so it inherits the mini-left scaleX flip. */
-#clawd-accessory {
-  position: absolute;
-  display: none;
-  pointer-events: none;
-  z-index: 2;
-  image-rendering: pixelated;
-  transform-origin: center center;
-}
-
 /* ── Test-result reactions ── */
 /* Confetti particle: starts near the head, arcs out and falls while fading. */
 .clawd-confetti {

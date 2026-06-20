@@ -397,37 +397,41 @@ window.electronAPI.onThemeConfig((newConfig) => {
   _cleanupLayeredTracking();
   initWithConfig(newConfig);
   // Re-anchor the worn accessory to the new theme's headAnchor.
-  applyAccessory();
+  reapplyAccessory();
 });
 
 window.electronAPI.onViewportOffset((offsetY) => {
   setViewportOffset(offsetY);
 });
 
-// ── Cosmetic accessory overlay (the pet's wardrobe) ──
-// A sibling layer over the pet, anchored to the head via theme layout.headAnchor.
-// It lives in #pet-container (so it inherits the mini-left scaleX flip) and is
-// independent of the pet's <object>/<img> render channel — so a worn item shows
-// across every state and theme.
+// ── Cosmetic accessory (the pet's wardrobe) ──
+// The worn item is injected as an <image> INSIDE the pet's live SVG document,
+// parented to the animated body group — so it inherits every transform (the
+// per-pose head position, the breathe/lean motion, the mini flip) and stays
+// glued to the head instead of floating in window space.
 //
-// Bottom-anchored: headAnchor.top is the head line where the item's base sits,
-// and the image grows upward from there (translate -50%,-100%). That lets hats
-// of any height rest correctly on the head from one shared anchor. Each item
-// may override `width` (container %) and nudge `dy` (container %, +down) — e.g.
-// a halo floats above the head. Position is container-relative percentages,
-// fine-tuned per theme in theme.json under layout.headAnchor.
+// `aspect` = the asset's viewBox w/h (so injected height is derived from width).
+// `wScale` scales the item vs the theme's base head width; `dy` nudges the
+// resting line (+down) in viewBox units — e.g. a halo floats above the head.
+// Placement comes from the theme's `layout.headAnchor` in viewBox units:
+//   { cx: head centre x, baseY: head-top line, width: base hat width }.
 const ACCESSORY_ASSETS = {
-  "cowboy-hat": { src: "../assets/accessories/cowboy-hat.svg" },
-  "party-hat":  { src: "../assets/accessories/party-hat.svg",  width: 40, dy: 3 },
-  "wizard-hat": { src: "../assets/accessories/wizard-hat.svg", width: 46, dy: 3 },
-  "top-hat":    { src: "../assets/accessories/top-hat.svg",    width: 42, dy: 2 },
-  "santa-hat":  { src: "../assets/accessories/santa-hat.svg",  width: 48, dy: 2 },
-  "pumpkin-hat":{ src: "../assets/accessories/pumpkin-hat.svg", width: 44, dy: 4 },
-  "halo":       { src: "../assets/accessories/halo.svg",       width: 52, dy: -8 },
+  "cowboy-hat": { file: "cowboy-hat.svg",  aspect: 200 / 103 },
+  "party-hat":  { file: "party-hat.svg",   aspect: 160 / 180, wScale: 0.7,  dy: 0.3 },
+  "wizard-hat": { file: "wizard-hat.svg",  aspect: 170 / 200, wScale: 0.95, dy: 0.3 },
+  "top-hat":    { file: "top-hat.svg",     aspect: 160 / 150, wScale: 0.85, dy: 0.2 },
+  "santa-hat":  { file: "santa-hat.svg",   aspect: 180 / 140, wScale: 1.0,  dy: 0.2 },
+  "pumpkin-hat":{ file: "pumpkin-hat.svg", aspect: 150 / 130, wScale: 0.85, dy: 0.4 },
+  "halo":       { file: "halo.svg",        aspect: 160 / 80,  wScale: 1.15, dy: -1.4 },
 };
-const DEFAULT_HEAD_ANCHOR = { left: 50, top: 42, width: 44, rotate: 0 };
+// viewBox-unit fallback if a theme declares no headAnchor (clawd-ish framing).
+// `width` = base hat width in viewBox units; `eyeGap` = units above the eyes
+// where the hat base rests; cx/baseY are the fixed fallback when no eyes found.
+const DEFAULT_HEAD_ANCHOR = { cx: 7.5, baseY: 6.5, width: 16, eyeGap: 2.5 };
+const SVG_NS = "http://www.w3.org/2000/svg";
+const XLINK_NS = "http://www.w3.org/1999/xlink";
 let _accessoryId = "none";       // the stored pref ("none" | concrete id | "seasonal")
-let _accessoryEl = null;
+let _accessoryActive = false;    // resolves to a real item right now (drives channel)
 let _accessoryCacheBust = 0;
 let _seasonalTimer = null;
 
@@ -448,42 +452,96 @@ function resolveAccessoryId() {
   return _accessoryId;
 }
 
-function ensureAccessoryEl() {
-  if (_accessoryEl) return _accessoryEl;
-  const el = document.createElement("img");
-  el.id = "clawd-accessory";
-  el.draggable = false;
-  el.alt = "";
-  container.appendChild(el);
-  _accessoryEl = el;
-  return el;
+function accNum(v, d) { return Number.isFinite(v) ? v : d; }
+
+// Find the pet's eyes group in a pose SVG. Every clawd pose draws eyes on the
+// head (ids/classes vary: eyes-js, eyes-code, eyes-blink…), so the eyes are a
+// reliable, pose-agnostic head marker.
+function findEyesEl(svgDoc) {
+  return svgDoc.querySelector('[id^="eyes"]')
+    || svgDoc.querySelector('[id^="eye"]')
+    || svgDoc.querySelector('[class~="eyes"]')
+    || svgDoc.querySelector('[class*="eye"]')
+    || null;
 }
 
-function applyAccessory() {
-  const id = resolveAccessoryId();
-  const item = ACCESSORY_ASSETS[id];
-  if (!item) {
-    if (_accessoryEl) _accessoryEl.style.display = "none";
-    return;
-  }
-  const el = ensureAccessoryEl();
+// Inject (or clear) the worn item inside the given SVG document. Idempotent.
+// The item is anchored to the eyes' bounding box and parented to the eyes'
+// group, so it sits on the head AND inherits that group's transforms (breathe,
+// body-bounce, lean) in every pose — no per-state tuning needed.
+function injectAccessory(svgDoc) {
+  if (!svgDoc) return;
+  const root = svgDoc.documentElement;
+  if (!root) return;
+  const prior = svgDoc.getElementById("clawd-acc");
+  if (prior) prior.remove();
+
+  const item = ACCESSORY_ASSETS[resolveAccessoryId()];
+  if (!item) return;
+
   const a = (_layout && _layout.headAnchor) || DEFAULT_HEAD_ANCHOR;
-  const left = Number.isFinite(a.left) ? a.left : DEFAULT_HEAD_ANCHOR.left;
-  const baseTop = Number.isFinite(a.top) ? a.top : DEFAULT_HEAD_ANCHOR.top;
-  const top = baseTop + (Number.isFinite(item.dy) ? item.dy : 0);
-  const width = Number.isFinite(item.width)
-    ? item.width
-    : (Number.isFinite(a.width) ? a.width : DEFAULT_HEAD_ANCHOR.width);
-  const rotate = Number.isFinite(a.rotate) ? a.rotate : 0;
-  // Cache-bust: Chromium reuses same-URL SVG docs, so a re-show would otherwise
-  // keep a stale frame (same gotcha as the state <img> ?_t= bust).
-  el.src = item.src + "?_t=" + (++_accessoryCacheBust);
-  el.style.left = left + "%";
-  el.style.top = top + "%";
-  el.style.width = width + "%";
-  // Bottom-anchored: image base sits on the head line, grows upward.
-  el.style.transform = `translate(-50%, -100%) rotate(${rotate}deg)`;
-  el.style.display = "block";
+  const baseW = accNum(a.width, DEFAULT_HEAD_ANCHOR.width);
+  const eyeGap = accNum(a.eyeGap, DEFAULT_HEAD_ANCHOR.eyeGap);
+
+  let cx;
+  let baseY;       // the head line the hat's base rests on
+  let parent = null;
+
+  const eyes = findEyesEl(svgDoc);
+  if (eyes) {
+    try {
+      const bb = eyes.getBBox();
+      if (bb && Number.isFinite(bb.x) && bb.width >= 0) {
+        cx = bb.x + bb.width / 2;
+        baseY = bb.y - eyeGap;            // a touch above the eyes = top of head
+        parent = eyes.parentNode || null;  // share the eyes' animated group
+      }
+    } catch { /* getBBox can throw on a not-yet-laid-out doc */ }
+  }
+  if (parent == null || !Number.isFinite(cx)) {
+    // Fallback: fixed theme anchor at the root (no pose tracking, best effort).
+    cx = accNum(a.cx, DEFAULT_HEAD_ANCHOR.cx);
+    baseY = accNum(a.baseY, DEFAULT_HEAD_ANCHOR.baseY);
+    parent = svgDoc.getElementById("body-js") || root;
+  }
+
+  const w = baseW * (item.wScale || 1);
+  const h = w / (item.aspect || 1.6);
+  const dy = item.dy || 0;
+  const x = cx - w / 2;
+  const y = baseY + dy - h; // bottom-anchored: the item's base sits at baseY+dy
+
+  const img = svgDoc.createElementNS(SVG_NS, "image");
+  img.setAttribute("id", "clawd-acc");
+  img.setAttribute("x", String(x));
+  img.setAttribute("y", String(y));
+  img.setAttribute("width", String(w));
+  img.setAttribute("height", String(h));
+  img.setAttribute("preserveAspectRatio", "xMidYMax meet");
+  img.style.pointerEvents = "none";
+  // Absolute file URL so it resolves regardless of the SVG doc's own location;
+  // cache-bust to dodge Chromium's same-URL SVG reuse.
+  const href = new URL("../assets/accessories/" + item.file, document.baseURI).href
+    + "?_t=" + (++_accessoryCacheBust);
+  img.setAttribute("href", href);
+  img.setAttributeNS(XLINK_NS, "href", href);
+
+  parent.appendChild(img);
+}
+
+// Re-apply to the live pet. If it's already an object SVG, inject directly;
+// otherwise re-swap the current state so the channel flips (an active accessory
+// forces the object channel for SVG states — see needsObjectChannel).
+function reapplyAccessory() {
+  _accessoryActive = !!ACCESSORY_ASSETS[resolveAccessoryId()];
+  if (clawdEl && clawdEl.tagName === "OBJECT" && clawdEl.contentDocument) {
+    injectAccessory(clawdEl.contentDocument);
+    if (!_accessoryActive) return; // nothing more to do when clearing
+  }
+  if (currentDisplayedSvg && (!clawdEl || clawdEl.tagName !== "OBJECT") && _accessoryActive && isSvgFile(currentDisplayedSvg)) {
+    // currently an <img> SVG but we want the hat → re-render through object channel
+    swapToFile(currentDisplayedSvg, currentState, needsObjectChannel(currentState, currentDisplayedSvg));
+  }
 }
 
 function setAccessory(id) {
@@ -492,9 +550,9 @@ function setAccessory(id) {
   // Re-resolve "seasonal" hourly so it flips across midnight / month boundaries.
   if (_seasonalTimer) { clearInterval(_seasonalTimer); _seasonalTimer = null; }
   if (_accessoryId === "seasonal") {
-    _seasonalTimer = setInterval(applyAccessory, 60 * 60 * 1000);
+    _seasonalTimer = setInterval(reapplyAccessory, 60 * 60 * 1000);
   }
-  applyAccessory();
+  reapplyAccessory();
 }
 
 if (window.electronAPI && typeof window.electronAPI.onSetAccessory === "function") {
@@ -711,6 +769,10 @@ function needsEyeTracking(state) {
  */
 function needsObjectChannel(state, file) {
   if (!isSvgFile(file)) return false;
+  // A worn accessory is injected into the SVG document, so SVG *state* poses
+  // must use the object channel. `state` is falsy for one-shot reaction swaps —
+  // we leave those on the image channel to avoid freezing their animation.
+  if (_accessoryActive && state) return true;
   return _forceSvgObjectChannel || needsEyeTracking(state) || _trustedScriptedSvgFiles.has(file);
 }
 
@@ -984,6 +1046,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       currentDisplayedSvg = file;
       currentDisplayedAssetUrl = url;
       applyPetTint();
+      injectAccessory(next.contentDocument);
 
       if (state && needsEyeTracking(state)) {
         attachEyeTracking(next);

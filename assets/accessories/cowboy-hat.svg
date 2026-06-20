@@ -1,47 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Cowboy hat accessory for Clawd on Desk.
-  Pixel-art aesthetic (8u grid, crisp edges) to match the Clawd theme.
-  Rendered by renderer.js as a sibling overlay layer anchored to the pet's
-  head via the per-theme `layout.headAnchor` config. viewBox is 160x80; the
-  art is bottom-anchored so the brim sits on the head.
+  Cowboy hat accessory for Clawd on Desk. viewBox 200x120 (aspect ~1.667).
+  Injected into the pet SVG (parented to the body group) so it tracks the head
+  through every pose and animation. Clear silhouette: wide upturned brim,
+  creased cattleman crown, leather band + gold buckle.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 80" shape-rendering="crispEdges" width="160" height="80">
-  <g id="cowboy-hat">
-    <!-- Crown (saddle brown) -->
-    <g fill="#b3743d">
-      <rect x="56" y="0" width="16" height="8"/>
-      <rect x="88" y="0" width="16" height="8"/>
-      <rect x="48" y="8" width="64" height="8"/>
-      <rect x="48" y="16" width="64" height="8"/>
-      <rect x="40" y="24" width="80" height="8"/>
-      <rect x="40" y="32" width="80" height="8"/>
-      <!-- Crown base flare -->
-      <rect x="32" y="48" width="96" height="8"/>
-      <!-- Up-curled brim tips (sit level with crown base) -->
-      <rect x="0" y="48" width="16" height="8"/>
-      <rect x="144" y="48" width="16" height="8"/>
-      <!-- Full brim row -->
-      <rect x="0" y="56" width="160" height="8"/>
-    </g>
-
-    <!-- Right-side / underside shading (darker brown) -->
-    <g fill="#95592b">
-      <rect x="104" y="8" width="8" height="8"/>
-      <rect x="104" y="16" width="8" height="8"/>
-      <rect x="112" y="24" width="8" height="8"/>
-      <rect x="112" y="32" width="8" height="8"/>
-      <rect x="120" y="48" width="8" height="8"/>
-      <!-- Brim underside -->
-      <rect x="8" y="64" width="144" height="8"/>
-      <!-- Brim center sag (front/back dips below the up-curled sides) -->
-      <rect x="32" y="72" width="96" height="8"/>
-    </g>
-
-    <!-- Hat band (dark leather) -->
-    <rect x="40" y="40" width="80" height="8" fill="#3f2a16"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 103" width="200" height="103">
+  <g stroke="#2e1c0d" stroke-width="3" stroke-linejoin="round">
+    <!-- Brim: wide crescent, sides curled up, slight front dip -->
+    <path d="M16,66 Q100,86 184,66 L184,73 Q100,100 16,73 Z" fill="#9c6837"/>
+    <!-- Crown: cattleman crease (two humps, center dip) -->
+    <path d="M60,71 C54,33 76,23 88,24 Q100,33 112,24 C124,23 146,33 140,71 Z" fill="#b07a45"/>
+    <!-- Leather band -->
+    <path d="M58,59 Q100,67 142,59 L142,70 Q100,78 58,70 Z" fill="#3c2815" stroke="none"/>
     <!-- Gold buckle -->
-    <rect x="72" y="40" width="16" height="8" fill="#e0b34a"/>
-    <rect x="76" y="42" width="8" height="4" fill="#8a6a1f"/>
+    <rect x="92" y="60" width="15" height="10" rx="1.5" fill="#e3b54a" stroke-width="1.5"/>
   </g>
+  <!-- Brim top highlight for a touch of depth -->
+  <path d="M40,69 Q100,84 160,69" fill="none" stroke="#b07a45" stroke-width="2.5" opacity="0.7"/>
 </svg>

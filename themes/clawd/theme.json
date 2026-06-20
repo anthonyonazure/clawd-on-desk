@@ -29,10 +29,10 @@
     "visibleHeightRatio": 0.58,
     "baselineBottomRatio": 0.05,
     "headAnchor": {
-      "left": 50,
-      "top": 62,
-      "width": 44,
-      "rotate": 0
+      "cx": 7.5,
+      "baseY": 6.5,
+      "width": 16,
+      "eyeGap": 2.5
     }
   },
   "eyeTracking": {
