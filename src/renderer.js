@@ -416,13 +416,13 @@ window.electronAPI.onViewportOffset((offsetY) => {
 // Placement comes from the theme's `layout.headAnchor` in viewBox units:
 //   { cx: head centre x, baseY: head-top line, width: base hat width }.
 const ACCESSORY_ASSETS = {
-  "cowboy-hat": { file: "cowboy-hat.svg",  aspect: 200 / 103 },
-  "party-hat":  { file: "party-hat.svg",   aspect: 160 / 180, wScale: 0.7,  dy: 0.3 },
-  "wizard-hat": { file: "wizard-hat.svg",  aspect: 170 / 200, wScale: 0.95, dy: 0.3 },
-  "top-hat":    { file: "top-hat.svg",     aspect: 160 / 150, wScale: 0.85, dy: 0.2 },
-  "santa-hat":  { file: "santa-hat.svg",   aspect: 180 / 140, wScale: 1.0,  dy: 0.2 },
-  "pumpkin-hat":{ file: "pumpkin-hat.svg", aspect: 150 / 130, wScale: 0.85, dy: 0.4 },
-  "halo":       { file: "halo.svg",        aspect: 160 / 80,  wScale: 1.15, dy: -1.4 },
+  "cowboy-hat": { file: "cowboy-hat.svg",  aspect: 16 / 7 },
+  "party-hat":  { file: "party-hat.svg",   aspect: 11 / 14, wScale: 0.7,  dy: 0.3 },
+  "wizard-hat": { file: "wizard-hat.svg",  aspect: 15 / 16, wScale: 0.95, dy: 0.3 },
+  "top-hat":    { file: "top-hat.svg",     aspect: 14 / 10, wScale: 0.88, dy: 0.2 },
+  "santa-hat":  { file: "santa-hat.svg",   aspect: 16 / 9,  wScale: 1.0,  dy: 0.2 },
+  "pumpkin-hat":{ file: "pumpkin-hat.svg", aspect: 13 / 9,  wScale: 0.85, dy: 0.4 },
+  "halo":       { file: "halo.svg",        aspect: 14 / 5,  wScale: 1.15, dy: -1.4 },
 };
 // viewBox-unit fallback if a theme declares no headAnchor (clawd-ish framing).
 // `width` = base hat width in viewBox units; `eyeGap` = units above the eyes

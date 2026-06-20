@@ -1,21 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  Cowboy hat accessory for Clawd on Desk. viewBox 200x120 (aspect ~1.667).
-  Injected into the pet SVG (parented to the body group) so it tracks the head
-  through every pose and animation. Clear silhouette: wide upturned brim,
-  creased cattleman crown, leather band + gold buckle.
--->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 103" width="200" height="103">
-  <g stroke="#2e1c0d" stroke-width="3" stroke-linejoin="round">
-    <!-- Brim: wide crescent, sides curled up, slight front dip -->
-    <path d="M16,66 Q100,86 184,66 L184,73 Q100,100 16,73 Z" fill="#9c6837"/>
-    <!-- Crown: cattleman crease (two humps, center dip) -->
-    <path d="M60,71 C54,33 76,23 88,24 Q100,33 112,24 C124,23 146,33 140,71 Z" fill="#b07a45"/>
-    <!-- Leather band -->
-    <path d="M58,59 Q100,67 142,59 L142,70 Q100,78 58,70 Z" fill="#3c2815" stroke="none"/>
-    <!-- Gold buckle -->
-    <rect x="92" y="60" width="15" height="10" rx="1.5" fill="#e3b54a" stroke-width="1.5"/>
+<!-- Cowboy hat — pixel art (16x7 grid, 1px cells) to match the Clawd sprite.
+     Injected into the pet SVG and scaled so each cell ~= one crab pixel. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 7" shape-rendering="crispEdges" width="16" height="7">
+  <!-- Crown (saddle brown) with cattleman crease (two humps, gap at 7-8) -->
+  <g fill="#a86a3a">
+    <rect x="5" y="0" width="2" height="1"/>
+    <rect x="9" y="0" width="2" height="1"/>
+    <rect x="5" y="1" width="6" height="1"/>
+    <rect x="5" y="2" width="6" height="1"/>
+    <rect x="4" y="3" width="8" height="1"/>
   </g>
-  <!-- Brim top highlight for a touch of depth -->
-  <path d="M40,69 Q100,84 160,69" fill="none" stroke="#b07a45" stroke-width="2.5" opacity="0.7"/>
+  <!-- Right-side crown shade -->
+  <g fill="#8a5630">
+    <rect x="10" y="1" width="1" height="1"/>
+    <rect x="10" y="2" width="1" height="1"/>
+    <rect x="11" y="3" width="1" height="1"/>
+  </g>
+  <!-- Hat band + gold buckle -->
+  <rect x="4" y="4" width="8" height="1" fill="#4a3018"/>
+  <rect x="7" y="4" width="2" height="1" fill="#e0b34a"/>
+  <!-- Brim (full row); underside narrower so the ends read as upturned tips -->
+  <rect x="0" y="5" width="16" height="1" fill="#a86a3a"/>
+  <rect x="2" y="6" width="12" height="1" fill="#8a5630"/>
 </svg>
