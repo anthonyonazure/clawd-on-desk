@@ -396,11 +396,179 @@ window.electronAPI.onThemeConfig((newConfig) => {
   // Clean up layered tracking before reinitializing
   _cleanupLayeredTracking();
   initWithConfig(newConfig);
+  // Re-anchor the worn accessory to the new theme's headAnchor.
+  applyAccessory();
 });
 
 window.electronAPI.onViewportOffset((offsetY) => {
   setViewportOffset(offsetY);
 });
+
+// ── Cosmetic accessory overlay (the pet's wardrobe) ──
+// A sibling layer over the pet, anchored to the head via theme layout.headAnchor.
+// It lives in #pet-container (so it inherits the mini-left scaleX flip) and is
+// independent of the pet's <object>/<img> render channel — so a worn item shows
+// across every state and theme.
+//
+// Bottom-anchored: headAnchor.top is the head line where the item's base sits,
+// and the image grows upward from there (translate -50%,-100%). That lets hats
+// of any height rest correctly on the head from one shared anchor. Each item
+// may override `width` (container %) and nudge `dy` (container %, +down) — e.g.
+// a halo floats above the head. Position is container-relative percentages,
+// fine-tuned per theme in theme.json under layout.headAnchor.
+const ACCESSORY_ASSETS = {
+  "cowboy-hat": { src: "../assets/accessories/cowboy-hat.svg" },
+  "party-hat":  { src: "../assets/accessories/party-hat.svg",  width: 40, dy: 3 },
+  "wizard-hat": { src: "../assets/accessories/wizard-hat.svg", width: 46, dy: 3 },
+  "top-hat":    { src: "../assets/accessories/top-hat.svg",    width: 42, dy: 2 },
+  "santa-hat":  { src: "../assets/accessories/santa-hat.svg",  width: 48, dy: 2 },
+  "pumpkin-hat":{ src: "../assets/accessories/pumpkin-hat.svg", width: 44, dy: 4 },
+  "halo":       { src: "../assets/accessories/halo.svg",       width: 52, dy: -8 },
+};
+const DEFAULT_HEAD_ANCHOR = { left: 50, top: 42, width: 44, rotate: 0 };
+let _accessoryId = "none";       // the stored pref ("none" | concrete id | "seasonal")
+let _accessoryEl = null;
+let _accessoryCacheBust = 0;
+let _seasonalTimer = null;
+
+// "seasonal" is a meta-id resolved by calendar date to a concrete item. Returns
+// "none" out of season. Birthday/other dates can be added later.
+function resolveSeasonalAccessory() {
+  const now = new Date();
+  const month = now.getMonth() + 1; // 1-12
+  const day = now.getDate();
+  if (month === 12) return "santa-hat";        // December → Santa
+  if (month === 10) return "pumpkin-hat";       // October → pumpkin
+  if (month === 1 && day === 1) return "party-hat"; // New Year's Day
+  return "none";
+}
+
+function resolveAccessoryId() {
+  if (_accessoryId === "seasonal") return resolveSeasonalAccessory();
+  return _accessoryId;
+}
+
+function ensureAccessoryEl() {
+  if (_accessoryEl) return _accessoryEl;
+  const el = document.createElement("img");
+  el.id = "clawd-accessory";
+  el.draggable = false;
+  el.alt = "";
+  container.appendChild(el);
+  _accessoryEl = el;
+  return el;
+}
+
+function applyAccessory() {
+  const id = resolveAccessoryId();
+  const item = ACCESSORY_ASSETS[id];
+  if (!item) {
+    if (_accessoryEl) _accessoryEl.style.display = "none";
+    return;
+  }
+  const el = ensureAccessoryEl();
+  const a = (_layout && _layout.headAnchor) || DEFAULT_HEAD_ANCHOR;
+  const left = Number.isFinite(a.left) ? a.left : DEFAULT_HEAD_ANCHOR.left;
+  const baseTop = Number.isFinite(a.top) ? a.top : DEFAULT_HEAD_ANCHOR.top;
+  const top = baseTop + (Number.isFinite(item.dy) ? item.dy : 0);
+  const width = Number.isFinite(item.width)
+    ? item.width
+    : (Number.isFinite(a.width) ? a.width : DEFAULT_HEAD_ANCHOR.width);
+  const rotate = Number.isFinite(a.rotate) ? a.rotate : 0;
+  // Cache-bust: Chromium reuses same-URL SVG docs, so a re-show would otherwise
+  // keep a stale frame (same gotcha as the state <img> ?_t= bust).
+  el.src = item.src + "?_t=" + (++_accessoryCacheBust);
+  el.style.left = left + "%";
+  el.style.top = top + "%";
+  el.style.width = width + "%";
+  // Bottom-anchored: image base sits on the head line, grows upward.
+  el.style.transform = `translate(-50%, -100%) rotate(${rotate}deg)`;
+  el.style.display = "block";
+}
+
+function setAccessory(id) {
+  const valid = id === "seasonal" || (typeof id === "string" && ACCESSORY_ASSETS[id]);
+  _accessoryId = valid ? id : "none";
+  // Re-resolve "seasonal" hourly so it flips across midnight / month boundaries.
+  if (_seasonalTimer) { clearInterval(_seasonalTimer); _seasonalTimer = null; }
+  if (_accessoryId === "seasonal") {
+    _seasonalTimer = setInterval(applyAccessory, 60 * 60 * 1000);
+  }
+  applyAccessory();
+}
+
+if (window.electronAPI && typeof window.electronAPI.onSetAccessory === "function") {
+  window.electronAPI.onSetAccessory(setAccessory);
+}
+
+// ── Pet color tint (palette swaps) ──
+// A CSS filter applied to the pet sprite only (the accessory keeps its own
+// colors). Re-applied on every swap because each state is a fresh element.
+const TINT_FILTERS = {
+  none: "",
+  midnight: "hue-rotate(200deg) saturate(1.2) brightness(0.82)",
+  gold: "sepia(0.8) saturate(2.2) hue-rotate(-18deg) brightness(1.05)",
+  vaporwave: "hue-rotate(265deg) saturate(1.6) contrast(1.05)",
+  mono: "grayscale(1) brightness(1.05)",
+  matcha: "hue-rotate(75deg) saturate(1.25) brightness(1.0)",
+};
+let _petTint = "none";
+
+function applyPetTint() {
+  if (!clawdEl) return;
+  clawdEl.style.filter = TINT_FILTERS[_petTint] || "";
+}
+
+function setPetTint(id) {
+  _petTint = (typeof id === "string" && TINT_FILTERS[id] != null) ? id : "none";
+  applyPetTint();
+}
+
+if (window.electronAPI && typeof window.electronAPI.onSetPetTint === "function") {
+  window.electronAPI.onSetPetTint(setPetTint);
+}
+
+// ── Test-result reactions ──
+// One-shot, theme-agnostic delight when a test command finishes: a confetti
+// burst over the pet on pass, a quick shake on fail. Pure DOM/CSS — no
+// dependency on per-theme reaction SVGs. Triggered by main via IPC.
+const CONFETTI_COLORS = ["#ff5d8f", "#ffd166", "#4ec3e0", "#8a5cff", "#5ad17a"];
+
+function burstConfetti() {
+  const n = 18;
+  for (let i = 0; i < n; i++) {
+    const p = document.createElement("div");
+    p.className = "clawd-confetti";
+    const startX = 30 + Math.floor((i / n) * 40); // spread across the head
+    const dx = (i % 2 === 0 ? 1 : -1) * (10 + (i * 7) % 60);
+    const delay = (i % 6) * 40;
+    p.style.left = startX + "%";
+    p.style.background = CONFETTI_COLORS[i % CONFETTI_COLORS.length];
+    p.style.setProperty("--dx", dx + "px");
+    p.style.animationDelay = delay + "ms";
+    container.appendChild(p);
+    // Remove after the animation (1.2s + max delay) to avoid DOM buildup.
+    setTimeout(() => { try { p.remove(); } catch {} }, 1500 + delay);
+  }
+}
+
+function shakePet() {
+  const target = container;
+  target.classList.remove("clawd-shake");
+  // Force reflow so re-adding the class restarts the animation.
+  void target.offsetWidth;
+  target.classList.add("clawd-shake");
+  setTimeout(() => { try { target.classList.remove("clawd-shake"); } catch {} }, 650);
+}
+
+function playTestReaction(result) {
+  if (result === "pass") burstConfetti();
+  else if (result === "fail") shakePet();
+}
+
+if (window.electronAPI && typeof window.electronAPI.onPlayTestReaction === "function") {
+  window.electronAPI.onPlayTestReaction(playTestReaction);
+}
 
 // Release an <object> SVG element: navigate away to unload the SVG document
 // (stops CSS animations and frees the internal frame), then remove from DOM.
@@ -815,6 +983,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       clawdEl = next;
       currentDisplayedSvg = file;
       currentDisplayedAssetUrl = url;
+      applyPetTint();
 
       if (state && needsEyeTracking(state)) {
         attachEyeTracking(next);
@@ -888,6 +1057,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       clawdEl = next;
       currentDisplayedSvg = file;
       currentDisplayedAssetUrl = url;
+      applyPetTint();
       scheduleLowPowerIdlePause();
     };
 

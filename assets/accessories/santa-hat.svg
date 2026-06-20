@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Santa hat accessory (seasonal: December). Fur trim rests at viewBox bottom. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 140" width="180" height="140">
+  <!-- Red flopping cone -->
+  <path d="M30,108 Q40,40 95,32 Q150,24 156,60 Q150,86 120,104 Z"
+        fill="#d8332f" stroke="#9c2420" stroke-width="4" stroke-linejoin="round"/>
+  <!-- White fur trim -->
+  <rect x="20" y="100" width="118" height="30" rx="15" fill="#f4f4f4" stroke="#cfcfcf" stroke-width="3"/>
+  <!-- Pompom -->
+  <circle cx="156" cy="58" r="17" fill="#f4f4f4" stroke="#cfcfcf" stroke-width="3"/>
+</svg>
