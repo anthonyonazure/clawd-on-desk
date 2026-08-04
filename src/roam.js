@@ -55,17 +55,39 @@ module.exports = function initRoam(ctx) {
     if (!wa) return null;
     const marginX = Math.round(wa.width * ROAM_MARGIN_RATIO);
     const marginY = Math.round(wa.height * ROAM_MARGIN_RATIO);
-    const xMin = wa.x + marginX;
-    const xMax = wa.x + wa.width - bounds.width - marginX;
-    const yMin = wa.y + marginY;
-    const yMax = wa.y + wa.height - bounds.height - marginY;
+    let xMin = wa.x + marginX;
+    let xMax = wa.x + wa.width - bounds.width - marginX;
+    let yMin = wa.y + marginY;
+    let yMax = wa.y + wa.height - bounds.height - marginY;
+    // Optional roam fence from ~/.clawd/roam-area.json —
+    // { enabled, left, top, right, bottom } as 0..1 fractions of the work area.
+    // Read per pick so edits apply without restarting the app.
+    try {
+      const fenceRaw = require("fs").readFileSync(
+        require("path").join(require("os").homedir(), ".clawd", "roam-area.json"),
+        "utf8"
+      );
+      const fence = JSON.parse(fenceRaw);
+      if (fence && fence.enabled !== false) {
+        const frac = (v, d) => {
+          const n = Number(v);
+          return Number.isFinite(n) ? Math.min(Math.max(n, 0), 1) : d;
+        };
+        xMin = Math.max(xMin, wa.x + Math.round(wa.width * frac(fence.left, 0)));
+        xMax = Math.min(xMax, wa.x + Math.round(wa.width * frac(fence.right, 1)) - bounds.width);
+        yMin = Math.max(yMin, wa.y + Math.round(wa.height * frac(fence.top, 0)));
+        yMax = Math.min(yMax, wa.y + Math.round(wa.height * frac(fence.bottom, 1)) - bounds.height);
+      }
+    } catch {}
     if (xMax <= xMin || yMax <= yMin) return null;
+    // Small fences need a smaller minimum hop or every target gets rejected.
+    const minDist = Math.min(ROAM_MIN_DIST, Math.max(24, Math.round((xMax - xMin + yMax - yMin) / 4)));
     const targetX = xMin + Math.floor(Math.random() * (xMax - xMin));
     const targetY = yMin + Math.floor(Math.random() * (yMax - yMin));
     const dx = targetX - bounds.x;
     const dy = targetY - bounds.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < ROAM_MIN_DIST) return null;
+    if (dist < minDist) return null;
     return { x: targetX, y: targetY };
   }
 
