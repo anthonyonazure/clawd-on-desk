@@ -16,10 +16,12 @@ ASAR_SVG = "/private/tmp/claude-501/-Users-anthony/368ed308-5713-49f1-87d6-2886e
 THEME_SRC = os.path.join(APP, "app.asar.unpacked/themes/clawd/theme.json")
 OUT = os.path.expanduser("~/Library/Application Support/clawd-on-desk/themes/clawd-outlaw")
 
-# Sprites where the hat comes OFF (he's asleep; hat rests for the night)
-NO_HAT = {"clawd-sleeping.svg", "clawd-mini-sleep.svg", "clawd-mini-enter-sleep.svg"}
-# Sprites too small / wrong pose for the cigarette
-NO_CIG = NO_HAT | {
+# Sprites where the hat comes OFF (asleep = hat rests for the night;
+# building = he swaps into his own hard hat, one hat at a time)
+SLEEP = {"clawd-sleeping.svg", "clawd-mini-sleep.svg", "clawd-mini-enter-sleep.svg"}
+NO_HAT = SLEEP | {"clawd-working-building.svg"}
+# Sprites too small / wrong pose for the cigarette (building keeps smoking)
+NO_CIG = SLEEP | {
     "clawd-error.svg",
     "clawd-mini-alert.svg", "clawd-mini-crabwalk.svg", "clawd-mini-enter.svg",
     "clawd-mini-happy.svg", "clawd-mini-idle.svg", "clawd-mini-peek.svg",
