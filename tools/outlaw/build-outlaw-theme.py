@@ -17,9 +17,11 @@ THEME_SRC = os.path.join(APP, "app.asar.unpacked/themes/clawd/theme.json")
 OUT = os.path.expanduser("~/Library/Application Support/clawd-on-desk/themes/clawd-outlaw")
 
 # Sprites where the hat comes OFF (asleep = hat rests for the night;
-# building = he swaps into his own hard hat, one hat at a time)
+# anything already on his head wins — one thing on the head at a time:
+# building = his own hard hat, carrying = box hoisted overhead)
 SLEEP = {"clawd-sleeping.svg", "clawd-mini-sleep.svg", "clawd-mini-enter-sleep.svg"}
-NO_HAT = SLEEP | {"clawd-working-building.svg"}
+HEADGEAR = {"clawd-working-building.svg", "clawd-working-carrying.svg"}
+NO_HAT = SLEEP | HEADGEAR
 # Sprites too small / wrong pose for the cigarette (building keeps smoking)
 NO_CIG = SLEEP | {
     "clawd-error.svg",
