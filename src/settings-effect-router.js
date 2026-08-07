@@ -142,12 +142,6 @@ function createSettingsEffectRouter(options = {}) {
         resolvePetAccessoryPayload(accessoryId, activeTheme)
       );
     }
-    if ("accessory" in changes) {
-      sendToRenderer("set-accessory", changes.accessory);
-    }
-    if ("petTint" in changes) {
-      sendToRenderer("set-pet-tint", changes.petTint);
-    }
     if ("costHudEnabled" in changes) {
       safeCall(logWarn, "Clawd: cost HUD reconcile failed:", reconcileCostHud);
     }
