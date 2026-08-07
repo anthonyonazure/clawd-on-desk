@@ -4,14 +4,43 @@ const defaultFs = require("fs");
 const defaultPath = require("path");
 const { detectAgentInstallations: defaultDetectAgentInstallations } = require("./agent-installation-detector");
 const settingsThemeImporter = require("./settings-theme-importer");
+const {
+  listPetTintOptions,
+  listPetAccessoryOptions,
+} = require("./pet-customization-catalog");
 
 const SOUND_OVERRIDE_ASSET_EXTS = new Set([".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"]);
+// These commands mutate trust material or persist facts learned from an SSH
+// transaction. They are main-process capabilities, not renderer commands.
+// Keeping the check at the IPC boundary means an injected/compromised Settings
+// renderer cannot mint a trusted install binding, advance a deployment
+// transaction, or claim that a remote profile was verified.
+const INTERNAL_SETTINGS_COMMANDS = new Set([
+  "remoteSsh.applyInstallationIdentity",
+  "remoteSsh.beginIdentityRotation",
+  "remoteSsh.updateIdentityStep",
+  "remoteSsh.commitIdentityRotation",
+  "remoteSsh.forceRevoke",
+  "remoteSsh.beginRuntimeModeSwitch",
+  "remoteSsh.advanceRuntimeModeSwitch",
+  "remoteSsh.switchRuntimeMode",
+  "remoteSsh.markDeployed",
+  "remoteSsh.markRemoteNode",
+]);
 const SOUND_OVERRIDE_DIALOG_STRINGS = {
   en: { title: "Choose a sound file", filterName: "Audio" },
   zh: { title: "选择音效文件", filterName: "音频" },
   "zh-TW": { title: "選擇音效檔案", filterName: "音效" },
   ko: { title: "음향 파일 선택", filterName: "오디오" },
   ja: { title: "音声ファイルを選択", filterName: "音声" },
+};
+
+const AGENT_DISCOVERY_DIALOG_STRINGS = {
+  en: { file: "Choose a tool executable", directory: "Choose a tool installation folder" },
+  zh: { file: "选择工具可执行文件", directory: "选择工具安装目录" },
+  "zh-TW": { file: "選擇工具執行檔", directory: "選擇工具安裝目錄" },
+  ko: { file: "도구 실행 파일 선택", directory: "도구 설치 폴더 선택" },
+  ja: { file: "ツールの実行ファイルを選択", directory: "ツールのインストールフォルダーを選択" },
 };
 
 const REMOVE_THEME_DIALOG_STRINGS = {
@@ -88,11 +117,39 @@ function rememberRuntimeSoundOverrideFile({ getActiveTheme }, themeId, soundName
 }
 
 function mapAgentMetadata(agent) {
-  return {
+  const metadata = {
     id: agent.id,
     name: agent.name,
     eventSource: agent.eventSource,
     capabilities: agent.capabilities || {},
+  };
+  if (typeof agent.category === "string" && agent.category) {
+    metadata.category = agent.category;
+  }
+  return metadata;
+}
+
+function mapCustomApplicationMetadata(application, options = {}) {
+  return {
+    id: application.id,
+    name: application.name,
+    category: application.category || "code",
+    eventSource: "custom-http",
+    custom: true,
+    sourcePath: application.sourcePath,
+    executablePath: application.executablePath,
+    processName: application.processName,
+    stateEndpoint: options.stateEndpoint || "",
+    lastStateEvent: options.lastStateEvent || null,
+    capabilities: {
+      httpHook: true,
+      permissionApproval: false,
+      interactiveBubble: false,
+      notificationHook: true,
+      sessionEnd: true,
+      subagent: false,
+      managedIntegration: false,
+    },
   };
 }
 
@@ -130,21 +187,12 @@ function registerSettingsIpc(options = {}) {
     || (() => ({ percent: 100 }));
   const getAllAgents = requiredDependency(options.getAllAgents, "getAllAgents");
   const detectAgentInstallations = options.detectAgentInstallations || defaultDetectAgentInstallations;
+  const getHookServerPort = options.getHookServerPort || (() => null);
+  const getRecentHookEvents = options.getRecentHookEvents || (() => []);
   const checkForUpdates = options.checkForUpdates || (() => {});
-  const getHardwareBuddyStatus = options.getHardwareBuddyStatus || (() => null);
-  const testHardwareBuddyApproval = options.testHardwareBuddyApproval || (async () => ({
-    status: "error",
-    message: "Hardware Buddy test approval is unavailable",
-  }));
-  const getQuickCommandPresets = options.getQuickCommandPresets || (() => ({
-    enabled: false,
-    presets: [],
-  }));
-  const sendQuickCommand = options.sendQuickCommand || (() => ({
-    status: "error",
-    code: "quick_commands_unavailable",
-    message: "Quick Commands are unavailable",
-  }));
+  const getUpdateCheckSnapshot = options.getUpdateCheckSnapshot || (() => ({ state: "idle" }));
+  const clearUpdateError = options.clearUpdateError || (() => ({ state: "idle" }));
+  const copyUpdateError = options.copyUpdateError || (() => ({ status: "error", message: "clipboard unavailable" }));
   const showTutorial = options.showTutorial || (() => ({
     status: "error",
     message: "Tutorial is unavailable",
@@ -159,19 +207,23 @@ function registerSettingsIpc(options = {}) {
     disposers.push(() => ipcMain.removeHandler(channel));
   }
 
-  function sanitizeQuickCommandPayload(payload) {
-    const object = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
-    return {
-      id: object.id,
-      clientRequestId: object.clientRequestId,
-    };
-  }
-
   function getDialogParent(event) {
     return getSettingsDialogParent(event, { BrowserWindow, getSettingsWindow });
   }
 
   handle("settings:get-snapshot", () => settingsController.getSnapshot());
+  // Distinct quota-reporting sources (this machine + WSL / SSH remotes). The
+  // General tab uses it to hide the "merge across machines" switch when it is
+  // a single-machine no-op.
+  handle("settings:get-quota-source-count", () => {
+    try {
+      return typeof options.getQuotaSourceCount === "function" ? options.getQuotaSourceCount() : 0;
+    } catch (_err) {
+      return 0;
+    }
+  });
+  handle("settings:get-pet-tint-options", () => listPetTintOptions());
+  handle("settings:get-pet-accessory-options", () => listPetAccessoryOptions());
   handle("settings:update", (_event, payload) => {
     if (!payload || typeof payload !== "object") {
       return { status: "error", message: "settings:update payload must be { key, value }" };
@@ -179,11 +231,18 @@ function registerSettingsIpc(options = {}) {
     if (payload.key === "tgMigration") {
       return { status: "error", message: "tgMigration is internal; use telegramMigration.dispatch" };
     }
-    // DANGER "auto-pilot": never let a plain settings:update flip this on. It
-    // must go through the setAutoApproveAll command, which demands confirmed:true.
-    // This makes the confirmation dialog a real boundary instead of UI-only.
-    if (payload.key === "autoApproveAllPermissions") {
-      return { status: "error", message: "autoApproveAllPermissions is gated; use the setAutoApproveAll command" };
+    // Permission automation is command-only: the command enforces confirmed
+    // transitions for both automatic modes at the data layer.
+    if (
+      payload.key === "permissionAutomationMode"
+      || payload.key === "permissionAutomationAutoToolsWarningDismissed"
+      || payload.key === "permissionAutomationUnattendedWarningDismissed"
+      || payload.key === "autoApproveAllPermissions"
+    ) {
+      return {
+        status: "error",
+        message: "permission automation is gated; use the setPermissionAutomationMode command",
+      };
     }
     return settingsController.applyUpdate(payload.key, payload.value);
   });
@@ -222,6 +281,9 @@ function registerSettingsIpc(options = {}) {
   handle("settings:command", async (_event, payload) => {
     if (!payload || typeof payload !== "object") {
       return { status: "error", message: "settings:command payload must be { action, payload }" };
+    }
+    if (INTERNAL_SETTINGS_COMMANDS.has(payload.action)) {
+      return { status: "error", message: `settings command "${payload.action}" is internal` };
     }
     return settingsController.applyCommand(payload.action, payload.payload);
   });
@@ -332,12 +394,21 @@ function registerSettingsIpc(options = {}) {
     try {
       const activeTheme = getActiveTheme();
       const activeId = activeTheme ? activeTheme._id : "clawd";
-      return themeLoader.listThemesWithMetadata().map((theme) =>
-        codexPetMain.decorateThemeMetadata({
+      return themeLoader.listThemesWithMetadata().map((theme) => {
+        const active = theme.id === activeId;
+        const runtimeCapabilities = active
+          && activeTheme
+          && isPlainObject(activeTheme._capabilities)
+          ? activeTheme._capabilities
+          : null;
+        return codexPetMain.decorateThemeMetadata({
           ...theme,
-          active: theme.id === activeId,
-        })
-      );
+          active,
+          ...(runtimeCapabilities
+            ? { capabilities: { ...(theme.capabilities || {}), ...runtimeCapabilities } }
+            : {}),
+        });
+      });
     } catch (err) {
       console.warn("Clawd: settings:list-themes failed:", err && err.message);
       return [];
@@ -412,22 +483,71 @@ function registerSettingsIpc(options = {}) {
 
   handle("settings:list-agents", () => {
     try {
-      return getAllAgents().map(mapAgentMetadata);
+      const snapshot = settingsController.getSnapshot();
+      const custom = Array.isArray(snapshot.customApplications)
+        ? snapshot.customApplications.map((application) => {
+          const port = getHookServerPort();
+          const stateEvents = getRecentHookEvents({ agentId: application.id })
+            .filter((event) => event && event.route === "state" && event.outcome === "accepted");
+          const lastStateEvent = stateEvents.length > 0 ? stateEvents[stateEvents.length - 1] : null;
+          return mapCustomApplicationMetadata(application, {
+            stateEndpoint: Number.isInteger(port) ? `http://127.0.0.1:${port}/state` : "",
+            lastStateEvent: lastStateEvent
+              ? { timestamp: lastStateEvent.timestamp, eventType: lastStateEvent.eventType }
+              : null,
+          });
+        })
+        : [];
+      return [...getAllAgents().map(mapAgentMetadata), ...custom];
     } catch (err) {
       console.warn("Clawd: settings:list-agents failed:", err && err.message);
       return [];
     }
   });
 
-  handle("settings:detect-agent-installations", () => {
+  handle("settings:pick-agent-discovery-path", async (event, payload) => {
+    const kind = payload && payload.kind;
+    if (kind !== "file" && kind !== "directory") {
+      return { status: "error", message: "pickAgentDiscoveryPath.kind must be file or directory" };
+    }
+    const lang = getLang();
+    const strings = AGENT_DISCOVERY_DIALOG_STRINGS[lang] || AGENT_DISCOVERY_DIALOG_STRINGS.en;
     try {
-      return detectAgentInstallations({ fs, path, now });
+      const result = await dialog.showOpenDialog(getDialogParent(event), {
+        title: strings[kind],
+        properties: [kind === "file" ? "openFile" : "openDirectory"],
+      });
+      if (!result || result.canceled || !Array.isArray(result.filePaths) || !result.filePaths[0]) {
+        return { status: "cancel" };
+      }
+      return { status: "ok", path: result.filePaths[0] };
+    } catch (err) {
+      return { status: "error", message: `agent discovery path picker failed: ${err && err.message}` };
+    }
+  });
+
+  handle("settings:detect-agent-installations", async (_ev, opts) => {
+    try {
+      const options = opts && typeof opts === "object" ? opts : {};
+      const detectorOptions = { fs, path, now, snapshot: settingsController.getSnapshot() };
+      if (options.refreshWsl) {
+        const { refreshWslDetection } = require("./agent-installation-detector");
+        await refreshWslDetection({ ...detectorOptions, skipDefaultIntegrations: false });
+        return detectAgentInstallations(detectorOptions);
+      }
+      return detectAgentInstallations(detectorOptions);
     } catch (err) {
       console.warn("Clawd: settings:detect-agent-installations failed:", err && err.message);
       return {
         checkedAt: now(),
         agents: [],
+        customAgents: [],
+        customTools: [],
         skippedAgentIds: [],
+        wslAgents: [],
+        wslDistros: [],
+        // Keep the manual Scan entry point alive even on a hard failure.
+        wslSupported: process.platform === "win32",
         error: err && err.message ? err.message : String(err),
       };
     }
@@ -456,16 +576,25 @@ function registerSettingsIpc(options = {}) {
       heroSvgContent,
       pendingUpdateVersion,
       autoUpdateCheck,
+      updateCheckSnapshot: getUpdateCheckSnapshot(),
     };
   });
 
-  handle("settings:check-for-updates", () => {
+  handle("settings:check-for-updates", async () => {
     try {
-      checkForUpdates(true);
-      return { status: "ok" };
+      const snapshot = await checkForUpdates(true);
+      return snapshot || getUpdateCheckSnapshot();
     } catch (err) {
       return { status: "error", message: (err && err.message) || String(err) };
     }
+  });
+
+  handle("settings:clear-update-error", () => clearUpdateError());
+
+  handle("settings:copy-update-error", (_event, copyText) => {
+    const boundedText = String(copyText == null ? "" : copyText).slice(0, 8 * 1024);
+    if (!boundedText) return { status: "error", message: "empty update error report" };
+    return copyUpdateError(boundedText);
   });
 
   handle("settings:show-tutorial", async () => {
@@ -477,10 +606,6 @@ function registerSettingsIpc(options = {}) {
     }
   });
 
-  handle("settings:get-hardware-buddy-status", () => getHardwareBuddyStatus());
-  handle("settings:test-hardware-buddy-approval", () => testHardwareBuddyApproval());
-  handle("settings:get-quick-command-presets", () => getQuickCommandPresets());
-  handle("settings:send-quick-command", (_event, payload) => sendQuickCommand(sanitizeQuickCommandPayload(payload)));
 
   handle("settings:open-external", async (_event, url) => {
     if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {

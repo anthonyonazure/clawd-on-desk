@@ -4,18 +4,70 @@
 
 const container = document.getElementById("pet-container");
 const clipLayer = document.getElementById("pet-clip");
+const facingStage = document.getElementById("pet-facing-stage") || container;
+const motionStage = document.getElementById("pet-motion-stage") || container;
+const assetDirectionStage = document.getElementById("pet-asset-direction-stage") || container;
+const mediaLayer = document.getElementById("pet-media-layer") || container;
+const accessoryLayer = document.getElementById("pet-accessory-layer") || container;
+const particleLayer = document.getElementById("pet-particle-layer") || container;
+const accessoryEl = document.getElementById("clawd-accessory");
+const accessoryLayout = globalThis.petAccessoryLayout || null;
 let clawdEl = document.getElementById("clawd");
 let pendingNext = null;
 const LOW_POWER_IDLE_PAUSE_MS = 5000;
 const SWAP_LOAD_FALLBACK_MS = 3000;
 const SWAP_VISIBILITY_RESCUE_BUFFER_MS = 750;
+const EYE_ATTACH_RETRY_MS = 16;
+const EYE_ATTACH_MAX_ATTEMPTS = 60;
+const WAKE_OBJECT_RELOAD_RETRIES = 1;
 const LOW_POWER_PAUSE_STYLE_ID = "clawd-low-power-pause-svg";
 const LOW_POWER_PAUSE_STATES = new Set(["idle", "mini-idle", "dozing"]);
 const LOW_POWER_BOUNDARY_EPSILON_MS = 80;
 const CLOUDLING_POINTER_BRIDGE_STATES = new Set(["idle", "mini-idle", "mini-peek"]);
+const CODEX_PET_VISUAL_BY_FILE = Object.freeze({
+  "codex-pet-idle-loop.svg": "idle-loop",
+  "codex-pet-idle-static.svg": "idle-static",
+  "codex-pet-waving-loop.svg": "waving-loop",
+  "codex-pet-waving-once.svg": "waving-once",
+  "codex-pet-jumping-loop.svg": "jumping-loop",
+  "codex-pet-jumping-once.svg": "jumping-once",
+  "codex-pet-failed-loop.svg": "failed-loop",
+  "codex-pet-waiting-loop.svg": "waiting-loop",
+  "codex-pet-running-loop.svg": "running-loop",
+  "codex-pet-review-loop.svg": "review-loop",
+  "codex-pet-drag-directional-loop.svg": "drag-directional",
+});
 let lowPowerIdleMode = false;
 let lowPowerIdlePauseTimer = null;
 let lowPowerSvgPaused = false;
+let lastSystemWakeId = null;
+let lastSystemWakeStatus = null;
+let pendingSystemWakeId = null;
+let queuedSystemWakePayload = null;
+let queuedSystemWakeReplayTimer = null;
+let _lowPowerStaticImageOverrides = {};
+let _petTintPayload = { id: "none", filter: "" };
+let _petTintSupported = false;
+let _accessoryPayload = {
+  id: "none",
+  assetFile: null,
+  aspect: 1,
+  widthScale: 1,
+  offsetY: 0,
+};
+let _accessorySupported = false;
+let _accessoryAttachments = null;
+let _accessoryAssetFile = null;
+let _accessoryAssetReady = false;
+let _accessoryAssetSettled = true;
+let _accessoryAssetLoadTimer = null;
+let _accessoryAssetWaiters = [];
+let _accessoryRaf = null;
+let _accessoryLastLayout = null;
+let _accessoryFollowKey = null;
+const _accessoryDiagnostics = new Set();
+const PET_TINT_FILTER_TOKEN_RE =
+  /^(?:hue-rotate\(-?\d+(?:\.\d+)?deg\)|(?:saturate|brightness|contrast|sepia|grayscale)\(\d+(?:\.\d+)?\))$/;
 
 // ── Theme config (injected via preload.js additionalArguments) ──
 let tc = window.themeConfig || {};
@@ -33,12 +85,31 @@ function initWithConfig(cfg) {
   _eyeTrackingStates = (tc.eyeTrackingStates) || ["idle", "dozing", "mini-idle"];
   _trustedScriptedSvgFiles = new Set(Array.isArray(tc.trustedScriptedSvgFiles) ? tc.trustedScriptedSvgFiles : []);
   _forceSvgObjectChannel = !!(tc.rendering && tc.rendering.svgChannel === "object");
+  _lowPowerStaticImageOverrides = (tc.rendering && tc.rendering.lowPowerStaticImageOverrides) || {};
+  _petTintSupported = tc.petTintSupported === true;
+  if (Object.prototype.hasOwnProperty.call(tc, "petTintPayload")) {
+    _petTintPayload = normalizePetTintPayload(tc.petTintPayload);
+  }
+  _accessorySupported = tc.accessorySupported === true;
+  _accessoryAttachments = (
+    _accessorySupported
+    && tc.accessoryAttachments
+    && typeof tc.accessoryAttachments === "object"
+  ) ? tc.accessoryAttachments : null;
+  if (Object.prototype.hasOwnProperty.call(tc, "accessoryPayload")) {
+    _accessoryPayload = normalizeAccessoryPayload(tc.accessoryPayload);
+  }
   _imgCacheBustSeq = 0;
   _miniViewBox = tc.miniModeViewBox || null;
   _fileViewBoxes = tc.fileViewBoxes || {};
   _dragSvg = tc.dragSvg || null;
   _dragSvgs = tc.dragSvgs || {};
+  isDragReacting = false;
+  currentDragSvg = null;
+  currentDragDirection = null;
   _idleFollowSvg = tc.idleFollowSvg || "clawd-idle-follow.svg";
+  // Pre-IPC first frame rests on the user-selected idle visual when one is set.
+  _initialIdleSvg = tc.idleDefaultVisual || _idleFollowSvg;
   _glyphFlipDefs = tc.glyphFlips || { "pixel-z": 4, "pixel-z-small": 3 };
 
   // Layered tracking: detect if theme uses multi-layer config
@@ -63,9 +134,14 @@ function initWithConfig(cfg) {
   _fileOffsets = os.fileOffsets || {};
   _transitions = tc.transitions || {};
   _miniFlipAssets = !!tc.miniFlipAssets;
+  _hasRoamVisual = !!tc.hasRoamVisual;
+  _roamFlipAssets = !!tc.roamFlipAssets;
 
   applyObjectScaleStyle(clawdEl, getObjectSvgName(clawdEl), null);
   applyObjectScaleStyle(pendingNext, getObjectSvgName(pendingNext), null);
+  if (_accessorySupported && _accessoryPayload.id !== "none") {
+    ensureAccessoryAsset();
+  }
 }
 
 function applyObjectScaleStyle(el, file, state) {
@@ -127,7 +203,12 @@ function setLowPowerSvgPaused(paused) {
   const next = !!paused;
   if (lowPowerSvgPaused === next) return;
   lowPowerSvgPaused = next;
-  if (next) _cancelLayerAnimLoop();
+  if (next) {
+    _cancelLayerAnimLoop();
+    cancelAccessoryFollow();
+  } else {
+    refreshAccessoryLayout();
+  }
   if (window.electronAPI && typeof window.electronAPI.setLowPowerIdlePaused === "function") {
     window.electronAPI.setLowPowerIdlePaused(next);
   }
@@ -236,6 +317,16 @@ function resumeCurrentSvgForLowPower() {
   setLowPowerSvgPaused(false);
 }
 
+function hasLowPowerPauseStyle(root = getCurrentSvgRoot()) {
+  if (!root) return false;
+  try {
+    const svgDoc = root.ownerDocument;
+    return !!(svgDoc && svgDoc.getElementById(LOW_POWER_PAUSE_STYLE_ID));
+  } catch {
+    return false;
+  }
+}
+
 function scheduleLowPowerIdlePause() {
   if (lowPowerIdlePauseTimer) {
     clearTimeout(lowPowerIdlePauseTimer);
@@ -266,6 +357,7 @@ function setLowPowerIdleMode(enabled) {
   } else {
     resumeCurrentSvgForLowPower();
   }
+  refreshCurrentStateForLowPowerStaticImage();
 }
 
 function isSvgFile(file) {
@@ -347,17 +439,26 @@ let _miniViewBox = null;
 let _fileViewBoxes = {};
 let _dragSvg;
 let _dragSvgs;
+let isDragReacting = false;
 let currentDragSvg = null;
+let currentDragDirection = null;
+const directionalDragBridgeWarnings = new Set();
+const codexPetVisualBridgeWarnings = new Set();
 let _idleFollowSvg;
+let _initialIdleSvg;
 let _glyphFlipDefs;
 let _objectScaleCSS;
 let _fileScales = {};
 let _fileOffsets = {};
 let _transitions = {};  // per-file fade config: { "file.apng": { in: 400, out: 400 } }
 let _miniFlipAssets = false; // theme's mini assets drawn in reverse direction
+let _hasRoamVisual = false;  // theme binds a dedicated roam visual (≠ idle)
+let _roamFlipAssets = false; // theme's roam visual is drawn facing left, not right
+let _roamHeadingLeft = false; // current walk direction; roam visuals are drawn facing right
 let _inMiniMode = false;
 let _miniPreEntryMode = false;
 let _viewportOffsetY = 0;
+let _viewportOffsetX = 0;
 
 function setViewportOffset(offsetY) {
   const next = Number.isFinite(offsetY) ? Math.max(0, Math.round(offsetY)) : 0;
@@ -367,15 +468,69 @@ function setViewportOffset(offsetY) {
   if (pendingNext) {
     applyObjectScaleStyle(pendingNext, getObjectSvgName(pendingNext), currentState);
   }
+  refreshAccessoryLayout();
+}
+
+// Issue #690: Linux outer-edge X offset. Deliberately the mirror image of
+// setViewportOffset() above in every way that matters — this is
+// composite-only. It must NOT call applyObjectScaleStyle() or
+// refreshAccessoryLayout(), and must NOT touch any element's `left`/`bottom` —
+// those are the Y-offset layout hot path (plan §4.4 point 4), and re-entering
+// it per X-offset update is exactly the per-frame stall #690's plan warns
+// about for mini's future animation entry point. #pet-container (this
+// function's only target) is the real screen-space layer the plan's DOM
+// layering puts the signed X translate on: `#pet-clip` (unmoved, carries the
+// internal-seam clip-path) -> `#pet-container` (this translate) ->
+// `#pet-facing-stage` (carries the separate mini-left mirror `scale: -1 1`,
+// src/styles.css). Because the flip lives on the child, not this element,
+// the translate here is never re-signed by it, and every descendant —
+// current/pending media, accessory, effect/particle, Cloudling pointer bridge
+// — inherits the shift for free by being painted inside the translated box.
+function setViewportOffsetX(offsetX) {
+  const next = Number.isFinite(offsetX) ? Math.round(offsetX) : 0;
+  if (next === _viewportOffsetX) return;
+  _viewportOffsetX = next;
+  if (container) container.style.translate = `${_viewportOffsetX}px 0`;
 }
 
 function shouldApplyMiniAssetFlip(state) {
+  // Free roam: the dedicated roam visual is drawn facing right; mirror it
+  // while the walk heads left (heading pushed from main via roam-heading).
+  // Themes whose roam asset faces left (roamFlipAssets) invert the mirror.
+  if (state === "roam") return _hasRoamVisual && (_roamHeadingLeft !== _roamFlipAssets);
+  // Only mini-family visuals mirror with flipAssets. mini-mode-change can land
+  // while a transitional visual (idle, drag reaction) is still on screen —
+  // those keep their orientation until the mini swap happens.
+  if (!state || !state.startsWith("mini-")) return false;
   return _miniFlipAssets && (_inMiniMode || (_miniPreEntryMode && state === "mini-crabwalk"));
 }
 
 function applyMiniFlip(el, state = currentState) {
-  if (!el || el.tagName !== "IMG") return;
-  el.style.transform = shouldApplyMiniAssetFlip(state) ? "scaleX(-1)" : "";
+  if (!assetDirectionStage || !assetDirectionStage.style) return;
+  const activeFlip = shouldApplyMiniAssetFlip(state);
+  if (el) el.__clawdAssetDirectionFlip = activeFlip;
+  assetDirectionStage.style.scale = activeFlip ? "-1 1" : "none";
+
+  // A media crossfade can leave older children alive after the shared stage
+  // adopts the new file's direction. Counter-flip only those older children
+  // whose stamped direction differs, using the stage's horizontal center so
+  // their fading position and orientation stay visually unchanged.
+  const stageWidth = assetDirectionStage.clientWidth || assetDirectionStage.offsetWidth;
+  for (const child of getPetMediaElements()) {
+    const childFlip = child === el
+      ? activeFlip
+      : child.__clawdAssetDirectionFlip === true;
+    if (childFlip === activeFlip) {
+      child.style.scale = "none";
+      child.style.transformOrigin = "";
+      continue;
+    }
+    const originX = Number.isFinite(stageWidth) && Number.isFinite(child.offsetLeft)
+      ? (stageWidth / 2) - child.offsetLeft
+      : null;
+    child.style.transformOrigin = originX == null ? "50% 50%" : `${originX}px 50%`;
+    child.style.scale = "-1 1";
+  }
 }
 
 // ── Layered tracking state (multi-layer eye/head/body tracking) ──
@@ -387,6 +542,7 @@ let _layerTargetDx = 0;           // raw dx from tick.js (scaled to _themeMaxOff
 let _layerTargetDy = 0;           // raw dy from tick.js
 let _layerAnimFrame = null;        // requestAnimationFrame handle
 let _layeredTrackingObj = null;    // the <object> element currently tracked (guard against re-init)
+let _layeredTrackingDocument = null;
 const LAYER_SETTLE_EPSILON = 0.02;
 
 initWithConfig(tc);
@@ -395,233 +551,494 @@ initWithConfig(tc);
 window.electronAPI.onThemeConfig((newConfig) => {
   // Clean up layered tracking before reinitializing
   _cleanupLayeredTracking();
+  cancelPendingSwap("theme-config");
+  clearAccessoryRuntime({ clearAsset: true });
   initWithConfig(newConfig);
-  // Re-anchor the worn accessory to the new theme's headAnchor.
-  reapplyAccessory();
+  applyPetTintToAllMedia();
 });
 
 window.electronAPI.onViewportOffset((offsetY) => {
   setViewportOffset(offsetY);
 });
 
-// ── Cosmetic accessory (the pet's wardrobe) ──
-// The worn item is injected as an <image> INSIDE the pet's live SVG document,
-// parented to the animated body group — so it inherits every transform (the
-// per-pose head position, the breathe/lean motion, the mini flip) and stays
-// glued to the head instead of floating in window space.
-//
-// `aspect` = the asset's viewBox w/h (so injected height is derived from width).
-// `wScale` scales the item vs the theme's base head width; `dy` nudges the
-// resting line (+down) in viewBox units — e.g. a halo floats above the head.
-// Placement comes from the theme's `layout.headAnchor` in viewBox units:
-//   { cx: head centre x, baseY: head-top line, width: base hat width }.
-const ACCESSORY_ASSETS = {
-  "cowboy-hat": { file: "cowboy-hat.svg",  aspect: 16 / 7 },
-  "party-hat":  { file: "party-hat.svg",   aspect: 11 / 14, wScale: 0.7,  dy: 0.3 },
-  "wizard-hat": { file: "wizard-hat.svg",  aspect: 15 / 16, wScale: 0.95, dy: 0.3 },
-  "top-hat":    { file: "top-hat.svg",     aspect: 14 / 10, wScale: 0.88, dy: 0.2 },
-  "santa-hat":  { file: "santa-hat.svg",   aspect: 16 / 9,  wScale: 1.0,  dy: 0.2 },
-  "pumpkin-hat":{ file: "pumpkin-hat.svg", aspect: 13 / 9,  wScale: 0.85, dy: 0.4 },
-  "halo":       { file: "halo.svg",        aspect: 14 / 5,  wScale: 1.15, dy: -1.4 },
-};
-// viewBox-unit fallback if a theme declares no headAnchor (clawd-ish framing).
-// `width` = base hat width in viewBox units; `eyeGap` = units above the eyes
-// where the hat base rests; cx/baseY are the fixed fallback when no eyes found.
-const DEFAULT_HEAD_ANCHOR = { cx: 7.5, baseY: 6.5, width: 16, eyeGap: 2.5 };
-const SVG_NS = "http://www.w3.org/2000/svg";
-const XLINK_NS = "http://www.w3.org/1999/xlink";
-let _accessoryId = "none";       // the stored pref ("none" | concrete id | "seasonal")
-let _accessoryActive = false;    // resolves to a real item right now (drives channel)
-let _accessoryCacheBust = 0;
-let _seasonalTimer = null;
+window.electronAPI.onViewportOffsetX((offsetX) => {
+  setViewportOffsetX(offsetX);
+});
 
-// "seasonal" is a meta-id resolved by calendar date to a concrete item. Returns
-// "none" out of season. Birthday/other dates can be added later.
-function resolveSeasonalAccessory() {
-  const now = new Date();
-  const month = now.getMonth() + 1; // 1-12
-  const day = now.getDate();
-  if (month === 12) return "santa-hat";        // December → Santa
-  if (month === 10) return "pumpkin-hat";       // October → pumpkin
-  if (month === 1 && day === 1) return "party-hat"; // New Year's Day
-  return "none";
+// ── Pet color tint ──
+// Main resolves a persisted catalog id to this small payload. The renderer
+// still rejects URL/variable/custom CSS syntax before projecting the filter
+// onto every live pet media element (current, pending, and fading-out).
+function isSafePetTintFilter(value) {
+  if (value === "") return true;
+  if (typeof value !== "string" || value.length > 240) return false;
+  const tokens = value.trim().split(/\s+/);
+  return tokens.length > 0 && tokens.every((token) => PET_TINT_FILTER_TOKEN_RE.test(token));
 }
 
-function resolveAccessoryId() {
-  if (_accessoryId === "seasonal") return resolveSeasonalAccessory();
-  return _accessoryId;
+function normalizePetTintPayload(payload) {
+  if (!payload || typeof payload !== "object") return { id: "none", filter: "" };
+  const id = typeof payload.id === "string" ? payload.id : "";
+  const filter = typeof payload.filter === "string" ? payload.filter.trim() : "";
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(id)) return { id: "none", filter: "" };
+  if (!isSafePetTintFilter(filter)) return { id: "none", filter: "" };
+  if (id === "none") return filter === "" ? { id, filter } : { id: "none", filter: "" };
+  if (!filter) return { id: "none", filter: "" };
+  return { id, filter };
 }
 
-function accNum(v, d) { return Number.isFinite(v) ? v : d; }
-
-// Find the pet's eyes group in a pose SVG. Every clawd pose draws eyes on the
-// head (ids/classes vary: eyes-js, eyes-code, eyes-blink…), so the eyes are a
-// reliable, pose-agnostic head marker.
-function findEyesEl(svgDoc) {
-  return svgDoc.querySelector('[id^="eyes"]')
-    || svgDoc.querySelector('[id^="eye"]')
-    || svgDoc.querySelector('[class~="eyes"]')
-    || svgDoc.querySelector('[class*="eye"]')
-    || null;
+function applyPetTintToElement(element) {
+  if (!element) return;
+  const isPetObject = element.tagName === "OBJECT"
+    && element.classList
+    && element.classList.contains("clawd-object");
+  const isPetImg = element.tagName === "IMG"
+    && element.classList
+    && element.classList.contains("clawd-img");
+  if (!isPetObject && !isPetImg) return;
+  element.style.filter = _petTintSupported ? _petTintPayload.filter : "";
 }
 
-// Inject (or clear) the worn item inside the given SVG document. Idempotent.
-// The item is anchored to the eyes' bounding box and parented to the eyes'
-// group, so it sits on the head AND inherits that group's transforms (breathe,
-// body-bounce, lean) in every pose — no per-state tuning needed.
-function injectAccessory(svgDoc) {
-  if (!svgDoc) return;
-  const root = svgDoc.documentElement;
-  if (!root) return;
-  const prior = svgDoc.getElementById("clawd-acc");
-  if (prior) prior.remove();
+function applyPetTintToAllMedia() {
+  for (const element of getPetMediaElements()) applyPetTintToElement(element);
+}
 
-  const item = ACCESSORY_ASSETS[resolveAccessoryId()];
-  if (!item) return;
+function setPetTintPayload(payload) {
+  _petTintPayload = normalizePetTintPayload(payload);
+  applyPetTintToAllMedia();
+}
 
-  const a = (_layout && _layout.headAnchor) || DEFAULT_HEAD_ANCHOR;
-  const baseW = accNum(a.width, DEFAULT_HEAD_ANCHOR.width);
-  const eyeGap = accNum(a.eyeGap, DEFAULT_HEAD_ANCHOR.eyeGap);
+if (window.electronAPI && typeof window.electronAPI.onPetTintChange === "function") {
+  window.electronAPI.onPetTintChange(setPetTintPayload);
+}
 
-  let cx;
-  let baseY;       // the head line the hat's base rests on
-  let parent = null;
+// ── Pet accessory wardrobe ──
+// Accessories are a persistent sibling of pet media. They never enter an SVG
+// document and never share the media filter or swap cleanup selector.
+function normalizeAccessoryPayload(payload) {
+  const none = {
+    id: "none",
+    assetFile: null,
+    aspect: 1,
+    widthScale: 1,
+    offsetY: 0,
+  };
+  if (!payload || typeof payload !== "object") return none;
+  const id = typeof payload.id === "string" ? payload.id : "";
+  if (!/^[a-z][a-z0-9-]{0,31}$/.test(id)) return none;
+  if (id === "none") return none;
+  const assetFile = typeof payload.assetFile === "string" ? payload.assetFile : "";
+  if (!/^[a-z][a-z0-9-]{0,63}\.svg$/.test(assetFile)) return none;
+  if (assetFile.includes("/") || assetFile.includes("\\")) return none;
+  const aspect = payload.aspect;
+  const widthScale = payload.widthScale;
+  const offsetY = payload.offsetY;
+  if (!Number.isFinite(aspect) || aspect < 0.1 || aspect > 10) return none;
+  if (!Number.isFinite(widthScale) || widthScale < 0.25 || widthScale > 2.5) return none;
+  if (!Number.isFinite(offsetY) || Math.abs(offsetY) > 64) return none;
+  return { id, assetFile, aspect, widthScale, offsetY };
+}
 
-  const eyes = findEyesEl(svgDoc);
-  if (eyes) {
-    try {
-      const bb = eyes.getBBox();
-      if (bb && Number.isFinite(bb.x) && bb.width >= 0) {
-        cx = bb.x + bb.width / 2;
-        baseY = bb.y - eyeGap;            // a touch above the eyes = top of head
-        parent = eyes.parentNode || null;  // share the eyes' animated group
-      }
-    } catch { /* getBBox can throw on a not-yet-laid-out doc */ }
+function cancelAccessoryFollow() {
+  if (_accessoryRaf != null) {
+    cancelAnimationFrame(_accessoryRaf);
+    _accessoryRaf = null;
   }
-  if (parent == null || !Number.isFinite(cx)) {
-    // Fallback: fixed theme anchor at the root (no pose tracking, best effort).
-    cx = accNum(a.cx, DEFAULT_HEAD_ANCHOR.cx);
-    baseY = accNum(a.baseY, DEFAULT_HEAD_ANCHOR.baseY);
-    parent = svgDoc.getElementById("body-js") || root;
+  _accessoryFollowKey = null;
+}
+
+function hideAccessory() {
+  cancelAccessoryFollow();
+  _accessoryLastLayout = null;
+  if (!accessoryEl) return;
+  accessoryEl.style.display = "none";
+  accessoryEl.style.transform = "";
+}
+
+function clearAccessoryAssetLoadTimer() {
+  if (_accessoryAssetLoadTimer == null) return;
+  clearTimeout(_accessoryAssetLoadTimer);
+  _accessoryAssetLoadTimer = null;
+}
+
+function clearAccessoryRuntime(options = {}) {
+  hideAccessory();
+  _accessoryDiagnostics.clear();
+  if (!options.clearAsset) return;
+  // Fully detach the old request before releasing pet-swap waiters. A waiter
+  // may synchronously re-enter ensureAccessoryAsset() for a newly selected
+  // accessory; no old cleanup is allowed to clear that new request afterward.
+  clearAccessoryAssetLoadTimer();
+  if (accessoryEl) {
+    accessoryEl.onload = null;
+    accessoryEl.onerror = null;
+    try { accessoryEl.src = ""; } catch {}
+  }
+  _accessoryAssetFile = null;
+  _accessoryAssetReady = false;
+  _accessoryAssetSettled = true;
+  flushAccessoryAssetWaiters();
+}
+
+function noteAccessoryDiagnostic(file, reason) {
+  const key = `${file || "unknown"}|${reason}`;
+  if (_accessoryDiagnostics.has(key)) return;
+  _accessoryDiagnostics.add(key);
+  try { console.warn(`Clawd: accessory fallback for ${file || "unknown"}: ${reason}`); } catch {}
+}
+
+function getAccessoryDescriptor(file, state) {
+  if (!_accessorySupported || !_accessoryAttachments || !file) return null;
+  const safeFile = String(file).replace(/^.*[\/\\]/, "");
+  const files = _accessoryAttachments.files;
+  if (files && typeof files === "object"
+      && Object.prototype.hasOwnProperty.call(files, safeFile)) {
+    return files[safeFile];
+  }
+  if (state && state.startsWith("mini-") && _accessoryAttachments.mini) {
+    return _accessoryAttachments.mini;
+  }
+  return _accessoryAttachments.default || null;
+}
+
+function getAccessoryStageSize() {
+  const width = assetDirectionStage && (assetDirectionStage.clientWidth || assetDirectionStage.offsetWidth);
+  const height = assetDirectionStage && (assetDirectionStage.clientHeight || assetDirectionStage.offsetHeight);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
+function getMediaLayoutBox(media) {
+  if (!media) return null;
+  const x = media.offsetLeft;
+  const y = media.offsetTop;
+  const width = media.clientWidth || media.offsetWidth;
+  const height = media.clientHeight || media.offsetHeight;
+  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  return { x, y, width, height };
+}
+
+function ensureAccessoryAsset() {
+  if (!accessoryEl || !_accessoryPayload.assetFile) return false;
+  const file = _accessoryPayload.assetFile;
+  if (_accessoryAssetFile === file) return _accessoryAssetReady;
+
+  _accessoryAssetFile = file;
+  _accessoryAssetReady = false;
+  _accessoryAssetSettled = false;
+  accessoryEl.style.display = "none";
+  accessoryEl.onload = () => {
+    if (_accessoryAssetFile !== file) return;
+    clearAccessoryAssetLoadTimer();
+    _accessoryAssetReady = true;
+    _accessoryAssetSettled = true;
+    refreshAccessoryLayout();
+    flushAccessoryAssetWaiters();
+  };
+  accessoryEl.onerror = () => {
+    if (_accessoryAssetFile !== file) return;
+    clearAccessoryAssetLoadTimer();
+    _accessoryAssetReady = false;
+    _accessoryAssetSettled = true;
+    hideAccessory();
+    noteAccessoryDiagnostic(file, "asset-load-failed");
+    flushAccessoryAssetWaiters();
+  };
+  const loadTimer = setTimeout(() => {
+    if (_accessoryAssetLoadTimer !== loadTimer || _accessoryAssetFile !== file) return;
+    _accessoryAssetLoadTimer = null;
+    _accessoryAssetReady = false;
+    _accessoryAssetSettled = true;
+    hideAccessory();
+    noteAccessoryDiagnostic(file, "asset-load-timeout");
+    flushAccessoryAssetWaiters();
+  }, SWAP_LOAD_FALLBACK_MS);
+  _accessoryAssetLoadTimer = loadTimer;
+  accessoryEl.src = `../assets/accessories/${file}`;
+  return false;
+}
+
+function flushAccessoryAssetWaiters() {
+  const waiters = _accessoryAssetWaiters;
+  _accessoryAssetWaiters = [];
+  for (const waiter of waiters) {
+    if (waiter.timer) clearTimeout(waiter.timer);
+    waiter.callback();
+  }
+}
+
+function shouldWaitForAccessoryAsset(file, state) {
+  if (!_accessorySupported || _accessoryPayload.id === "none") return false;
+  const descriptor = getAccessoryDescriptor(file, state);
+  if (!descriptor || descriptor.visibility === "hidden") return false;
+  ensureAccessoryAsset();
+  return !_accessoryAssetSettled;
+}
+
+function deferSwapUntilAccessorySettles(file, state, next, callback) {
+  if (!shouldWaitForAccessoryAsset(file, state)) return false;
+  if (next.__clawdWaitingForAccessory) return true;
+  next.__clawdWaitingForAccessory = true;
+  let settled = false;
+  const resume = () => {
+    if (settled) return;
+    settled = true;
+    next.__clawdWaitingForAccessory = false;
+    callback();
+  };
+  const waiter = {
+    callback: resume,
+    timer: setTimeout(() => {
+      const index = _accessoryAssetWaiters.indexOf(waiter);
+      if (index >= 0) _accessoryAssetWaiters.splice(index, 1);
+      resume();
+    }, SWAP_LOAD_FALLBACK_MS),
+  };
+  _accessoryAssetWaiters.push(waiter);
+  return true;
+}
+
+function getCurrentAccessoryContext() {
+  if (!_accessorySupported || !_accessoryAttachments) return null;
+  if (!_accessoryPayload || _accessoryPayload.id === "none" || !_accessoryPayload.assetFile) return null;
+  if (!clawdEl || !clawdEl.isConnected || !currentDisplayedSvg) return null;
+  const descriptor = getAccessoryDescriptor(currentDisplayedSvg, currentDisplayedState);
+  if (!descriptor || typeof descriptor !== "object") return null;
+  return {
+    file: currentDisplayedSvg,
+    state: currentDisplayedState,
+    media: clawdEl,
+    descriptor,
+  };
+}
+
+function computeStaticAccessoryLayout(context) {
+  if (!accessoryLayout || typeof accessoryLayout.computeStaticAccessoryLayout !== "function") return null;
+  const frame = context.descriptor.staticFrame;
+  const mediaBox = getMediaLayoutBox(context.media);
+  const viewBox = resolveViewBox(context.state, context.file);
+  const stageSize = getAccessoryStageSize();
+  if (!frame || !mediaBox || !viewBox || !stageSize) return null;
+  return accessoryLayout.computeStaticAccessoryLayout({
+    mediaBox,
+    viewBox,
+    frame,
+    accessory: _accessoryPayload,
+    stageSize,
+  });
+}
+
+function computeFollowAccessoryLayout(context) {
+  if (!accessoryLayout || typeof accessoryLayout.computeDynamicAccessoryLayout !== "function") return null;
+  const followTarget = context.descriptor.followTarget;
+  if (!followTarget || !followTarget.frame) return null;
+  if (!/^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/.test(followTarget.id || "")) return null;
+  if (!context.media || context.media.tagName !== "OBJECT") return null;
+  let target;
+  let matrix;
+  try {
+    const doc = context.media.contentDocument;
+    target = doc && doc.getElementById(followTarget.id);
+    matrix = target && typeof target.getCTM === "function" ? target.getCTM() : null;
+  } catch {
+    return null;
+  }
+  if (!target || !matrix) return null;
+  const mediaBox = getMediaLayoutBox(context.media);
+  const stageSize = getAccessoryStageSize();
+  if (!mediaBox || !stageSize) return null;
+  return accessoryLayout.computeDynamicAccessoryLayout({
+    mediaOffset: { x: mediaBox.x, y: mediaBox.y },
+    matrix,
+    frame: followTarget.frame,
+    accessory: _accessoryPayload,
+    stageSize,
+  });
+}
+
+function applyAccessoryLayout(layout) {
+  if (!accessoryEl || !_accessoryAssetReady || !layout) return false;
+  const unchanged = accessoryLayout
+    && typeof accessoryLayout.layoutsEqual === "function"
+    && accessoryLayout.layoutsEqual(_accessoryLastLayout, layout);
+  if (!unchanged) {
+    const matrix = layout.matrix;
+    accessoryEl.style.width = `${layout.width}px`;
+    accessoryEl.style.height = `${layout.height}px`;
+    accessoryEl.style.transform =
+      `matrix(${matrix.a}, ${matrix.b}, ${matrix.c}, ${matrix.d}, ${matrix.e}, ${matrix.f})`;
+    _accessoryLastLayout = layout;
+  }
+  accessoryEl.style.filter = "none";
+  accessoryEl.style.display = "block";
+  return true;
+}
+
+function accessoryFollowTick(expectedKey) {
+  _accessoryRaf = null;
+  if (document.hidden === true || shouldSuppressPassiveTrackingForLowPower()) return;
+  const context = getCurrentAccessoryContext();
+  if (!context || context.descriptor.visibility === "hidden") {
+    hideAccessory();
+    return;
+  }
+  const follow = context.descriptor.followTarget;
+  const key = follow
+    ? `${context.file}|${_accessoryPayload.id}|${follow.id}`
+    : null;
+  if (!key || key !== expectedKey || key !== _accessoryFollowKey) {
+    refreshAccessoryLayout();
+    return;
+  }
+  const layout = computeFollowAccessoryLayout(context);
+  if (!layout) {
+    noteAccessoryDiagnostic(context.file, `follow-target-unavailable:${follow.id}`);
+    cancelAccessoryFollow();
+    applyAccessoryLayout(computeStaticAccessoryLayout(context));
+    return;
+  }
+  applyAccessoryLayout(layout);
+  _accessoryRaf = requestAnimationFrame(() => accessoryFollowTick(expectedKey));
+}
+
+function startAccessoryFollow(context) {
+  const follow = context.descriptor.followTarget;
+  if (!follow || shouldSuppressPassiveTrackingForLowPower()) return;
+  const key = `${context.file}|${_accessoryPayload.id}|${follow.id}`;
+  cancelAccessoryFollow();
+  _accessoryFollowKey = key;
+  _accessoryRaf = requestAnimationFrame(() => accessoryFollowTick(key));
+}
+
+function refreshAccessoryLayout() {
+  cancelAccessoryFollow();
+  const context = getCurrentAccessoryContext();
+  if (!context || context.descriptor.visibility === "hidden") {
+    hideAccessory();
+    return;
+  }
+  if (!ensureAccessoryAsset()) {
+    hideAccessory();
+    return;
   }
 
-  const w = baseW * (item.wScale || 1);
-  const h = w / (item.aspect || 1.6);
-  const dy = item.dy || 0;
-  const x = cx - w / 2;
-  const y = baseY + dy - h; // bottom-anchored: the item's base sits at baseY+dy
-
-  const img = svgDoc.createElementNS(SVG_NS, "image");
-  img.setAttribute("id", "clawd-acc");
-  img.setAttribute("x", String(x));
-  img.setAttribute("y", String(y));
-  img.setAttribute("width", String(w));
-  img.setAttribute("height", String(h));
-  img.setAttribute("preserveAspectRatio", "xMidYMax meet");
-  img.style.pointerEvents = "none";
-  // Absolute file URL so it resolves regardless of the SVG doc's own location;
-  // cache-bust to dodge Chromium's same-URL SVG reuse.
-  const href = new URL("../assets/accessories/" + item.file, document.baseURI).href
-    + "?_t=" + (++_accessoryCacheBust);
-  img.setAttribute("href", href);
-  img.setAttributeNS(XLINK_NS, "href", href);
-
-  parent.appendChild(img);
-}
-
-// Re-apply to the live pet. If it's already an object SVG, inject directly;
-// otherwise re-swap the current state so the channel flips (an active accessory
-// forces the object channel for SVG states — see needsObjectChannel).
-function reapplyAccessory() {
-  _accessoryActive = !!ACCESSORY_ASSETS[resolveAccessoryId()];
-  if (clawdEl && clawdEl.tagName === "OBJECT" && clawdEl.contentDocument) {
-    injectAccessory(clawdEl.contentDocument);
-    if (!_accessoryActive) return; // nothing more to do when clearing
+  const follow = context.descriptor.followTarget;
+  if (follow && context.media.tagName === "OBJECT") {
+    const dynamicLayout = computeFollowAccessoryLayout(context);
+    if (dynamicLayout) {
+      applyAccessoryLayout(dynamicLayout);
+      startAccessoryFollow(context);
+      return;
+    }
+    noteAccessoryDiagnostic(context.file, `follow-target-unavailable:${follow.id}`);
   }
-  if (currentDisplayedSvg && (!clawdEl || clawdEl.tagName !== "OBJECT") && _accessoryActive && isSvgFile(currentDisplayedSvg)) {
-    // currently an <img> SVG but we want the hat → re-render through object channel
-    swapToFile(currentDisplayedSvg, currentState, needsObjectChannel(currentState, currentDisplayedSvg));
+  const staticLayout = computeStaticAccessoryLayout(context);
+  if (!applyAccessoryLayout(staticLayout)) {
+    hideAccessory();
+    noteAccessoryDiagnostic(context.file, "static-layout-unavailable");
   }
 }
 
-function setAccessory(id) {
-  const valid = id === "seasonal" || (typeof id === "string" && ACCESSORY_ASSETS[id]);
-  _accessoryId = valid ? id : "none";
-  // Re-resolve "seasonal" hourly so it flips across midnight / month boundaries.
-  if (_seasonalTimer) { clearInterval(_seasonalTimer); _seasonalTimer = null; }
-  if (_accessoryId === "seasonal") {
-    _seasonalTimer = setInterval(reapplyAccessory, 60 * 60 * 1000);
+function setAccessoryPayload(payload) {
+  const next = normalizeAccessoryPayload(payload);
+  const fileChanged = next.assetFile !== _accessoryAssetFile;
+  _accessoryPayload = next;
+  if (next.id === "none" || !_accessorySupported) {
+    clearAccessoryRuntime({ clearAsset: true });
+    refreshAccessoryMediaChannel();
+    return;
   }
-  reapplyAccessory();
+  if (fileChanged) clearAccessoryRuntime({ clearAsset: true });
+  refreshAccessoryLayout();
+  refreshAccessoryMediaChannel();
 }
 
-if (window.electronAPI && typeof window.electronAPI.onSetAccessory === "function") {
-  window.electronAPI.onSetAccessory(setAccessory);
+if (window.electronAPI && typeof window.electronAPI.onPetAccessoryChange === "function") {
+  window.electronAPI.onPetAccessoryChange(setAccessoryPayload);
 }
 
-// ── Pet color tint (palette swaps) ──
-// A CSS filter applied to the pet sprite only (the accessory keeps its own
-// colors). Re-applied on every swap because each state is a fresh element.
-const TINT_FILTERS = {
-  none: "",
-  midnight: "hue-rotate(200deg) saturate(1.2) brightness(0.82)",
-  gold: "sepia(0.8) saturate(2.2) hue-rotate(-18deg) brightness(1.05)",
-  vaporwave: "hue-rotate(265deg) saturate(1.6) contrast(1.05)",
-  mono: "grayscale(1) brightness(1.05)",
-  matcha: "hue-rotate(75deg) saturate(1.25) brightness(1.0)",
-};
-let _petTint = "none";
-
-function applyPetTint() {
-  if (!clawdEl) return;
-  clawdEl.style.filter = TINT_FILTERS[_petTint] || "";
+if (document && typeof document.addEventListener === "function") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden === true) cancelAccessoryFollow();
+    else refreshAccessoryLayout();
+  });
 }
 
-function setPetTint(id) {
-  _petTint = (typeof id === "string" && TINT_FILTERS[id] != null) ? id : "none";
-  applyPetTint();
-}
-
-if (window.electronAPI && typeof window.electronAPI.onSetPetTint === "function") {
-  window.electronAPI.onSetPetTint(setPetTint);
+if (window && typeof window.addEventListener === "function") {
+  window.addEventListener("resize", refreshAccessoryLayout);
+  window.addEventListener("beforeunload", () => {
+    clearAccessoryRuntime({ clearAsset: true });
+    clearTestReactionVisuals();
+  });
 }
 
 // ── Test-result reactions ──
-// One-shot, theme-agnostic delight when a test command finishes: a confetti
-// burst over the pet on pass, a quick shake on fail. Pure DOM/CSS — no
-// dependency on per-theme reaction SVGs. Triggered by main via IPC.
-const CONFETTI_COLORS = ["#ff5d8f", "#ffd166", "#4ec3e0", "#8a5cff", "#5ad17a"];
+// Theme-independent decorative overlays. They never swap the current state
+// SVG, pause cursor tracking, or enter the click/drag reaction state machine.
+const TEST_CONFETTI_COLORS = ["#ff5d8f", "#ffd166", "#4ec3e0", "#8a5cff", "#5ad17a"];
+const testConfettiTimers = new Map();
+let testShakeTimer = null;
 
-function burstConfetti() {
-  const n = 18;
-  for (let i = 0; i < n; i++) {
-    const p = document.createElement("div");
-    p.className = "clawd-confetti";
-    const startX = 30 + Math.floor((i / n) * 40); // spread across the head
+function clearTestConfetti() {
+  for (const [particle, timer] of testConfettiTimers) {
+    if (timer) clearTimeout(timer);
+    try { particle.remove(); } catch {}
+  }
+  testConfettiTimers.clear();
+}
+
+function clearTestShake() {
+  if (testShakeTimer) {
+    clearTimeout(testShakeTimer);
+    testShakeTimer = null;
+  }
+  if (facingStage) facingStage.classList.remove("clawd-test-shake");
+}
+
+function clearTestReactionVisuals() {
+  clearTestConfetti();
+  clearTestShake();
+}
+
+function burstTestConfetti() {
+  clearTestReactionVisuals();
+  if (!particleLayer) return;
+  const count = 18;
+  for (let i = 0; i < count; i++) {
+    const particle = document.createElement("div");
+    const startX = 30 + Math.floor((i / count) * 40);
     const dx = (i % 2 === 0 ? 1 : -1) * (10 + (i * 7) % 60);
     const delay = (i % 6) * 40;
-    p.style.left = startX + "%";
-    p.style.background = CONFETTI_COLORS[i % CONFETTI_COLORS.length];
-    p.style.setProperty("--dx", dx + "px");
-    p.style.animationDelay = delay + "ms";
-    container.appendChild(p);
-    // Remove after the animation (1.2s + max delay) to avoid DOM buildup.
-    setTimeout(() => { try { p.remove(); } catch {} }, 1500 + delay);
+    particle.className = "clawd-test-confetti";
+    particle.style.left = `${startX}%`;
+    particle.style.background = TEST_CONFETTI_COLORS[i % TEST_CONFETTI_COLORS.length];
+    particle.style.setProperty("--test-confetti-dx", `${dx}px`);
+    particle.style.animationDelay = `${delay}ms`;
+    particleLayer.appendChild(particle);
+    const timer = setTimeout(() => {
+      testConfettiTimers.delete(particle);
+      try { particle.remove(); } catch {}
+    }, 1500 + delay);
+    testConfettiTimers.set(particle, timer);
   }
 }
 
-function shakePet() {
-  const target = container;
-  target.classList.remove("clawd-shake");
-  // Force reflow so re-adding the class restarts the animation.
-  void target.offsetWidth;
-  target.classList.add("clawd-shake");
-  setTimeout(() => { try { target.classList.remove("clawd-shake"); } catch {} }, 650);
+function shakePetForTestFailure() {
+  clearTestReactionVisuals();
+  if (!facingStage) return;
+  // Force a style flush so consecutive failed test runs restart the wobble.
+  void facingStage.offsetWidth;
+  facingStage.classList.add("clawd-test-shake");
+  testShakeTimer = setTimeout(() => {
+    testShakeTimer = null;
+    try { facingStage.classList.remove("clawd-test-shake"); } catch {}
+  }, 650);
 }
 
 function playTestReaction(result) {
-  if (result === "pass") burstConfetti();
-  else if (result === "fail") shakePet();
+  if (dndEnabled) return;
+  if (result === "pass") burstTestConfetti();
+  else if (result === "fail") shakePetForTestFailure();
 }
 
 if (window.electronAPI && typeof window.electronAPI.onPlayTestReaction === "function") {
@@ -645,10 +1062,10 @@ function releaseImg(el) {
 
 // --- Reaction state (visual side) ---
 let isReacting = false;
-let isDragReacting = false;
 let reactTimer = null;
 let currentIdleSvg = null;    // tracks which SVG is currently showing
 let currentState = null;      // last state name received from main (for re-pulse)
+let currentRequestedSvg = null; // original state file from main, before low-power substitution
 let lastCloudlingPointerPayload = null;
 let dndEnabled = false;
 let miniLeftFlip = false;
@@ -657,12 +1074,16 @@ if (window.electronAPI && typeof window.electronAPI.onLowPowerIdleModeChange ===
   window.electronAPI.onLowPowerIdleModeChange(setLowPowerIdleMode);
 }
 
-window.electronAPI.onDndChange((enabled) => { dndEnabled = enabled; });
+window.electronAPI.onDndChange((enabled) => {
+  dndEnabled = enabled;
+  if (dndEnabled) clearTestReactionVisuals();
+});
 
 window.electronAPI.onMiniModeChange((enabled, edge, options) => {
   const preEntry = !!(options && options.preEntry);
   _miniPreEntryMode = !!enabled && preEntry;
   _inMiniMode = !!enabled && !preEntry;
+  if (enabled) clearTestReactionVisuals();
   miniLeftFlip = !!enabled && edge === "left";
   container.classList.toggle("mini-left", miniLeftFlip);
   applyMiniFlip(clawdEl, currentState);
@@ -675,6 +1096,7 @@ window.electronAPI.onMiniModeChange((enabled, edge, options) => {
   if (shouldUseCloudlingPointerBridge(currentState, currentDisplayedSvg) && lastCloudlingPointerPayload) {
     applyCloudlingPointerBridge(lastCloudlingPointerPayload);
   }
+  refreshAccessoryLayout();
 });
 
 // Multi-monitor seam clip: in mini mode at an internal seam, main sends the
@@ -682,8 +1104,8 @@ window.electronAPI.onMiniModeChange((enabled, edge, options) => {
 // rest away so the half that physically crosses onto the neighbouring
 // monitor renders nothing there — the local display keeps the half-body peek.
 //
-// The clip is applied to #pet-clip, which (unlike #pet-container) never
-// carries transform: scaleX(-1). A clip-path on the flipped container would
+// The clip is applied to #pet-clip outside #pet-facing-stage, which carries
+// the left-edge mini-mode flip. A clip-path inside that flipped stage would
 // be mirrored too, so a left-edge clip would land on the wrong half; the
 // unflipped wrapper keeps `inset()` in screen space for both edges.
 function applyMiniClip(info) {
@@ -765,15 +1187,71 @@ function needsEyeTracking(state) {
 }
 
 /**
+ * Determine if this state+file combination should attach eye tracking.
+ * Idle can rest on a non-follow visual (#509); only the follow sprite carries
+ * eye targets, and tick.js only streams eye movement for that exact file —
+ * attaching to anything else retries until timeout, or freezes stale offsets
+ * into a third-party SVG that happens to expose targets.
+ */
+function tracksEyesForFile(state, file) {
+  if (!needsEyeTracking(state)) return false;
+  return state !== "idle" || file === _idleFollowSvg;
+}
+
+/**
  * Determine if a state+file needs the <object> channel.
  */
 function needsObjectChannel(state, file) {
   if (!isSvgFile(file)) return false;
-  // A worn accessory is injected into the SVG document, so SVG *state* poses
-  // must use the object channel. `state` is falsy for one-shot reaction swaps —
-  // we leave those on the image channel to avoid freezing their animation.
-  if (_accessoryActive && state) return true;
-  return _forceSvgObjectChannel || needsEyeTracking(state) || _trustedScriptedSvgFiles.has(file);
+  const accessoryDescriptor = getAccessoryDescriptor(file, state);
+  const needsAccessoryFollow = !!(
+    _accessoryPayload.id !== "none"
+    && accessoryDescriptor
+    && accessoryDescriptor.followTarget
+  );
+  return _forceSvgObjectChannel
+    || needsEyeTracking(state)
+    || _trustedScriptedSvgFiles.has(file)
+    || needsAccessoryFollow;
+}
+
+function refreshAccessoryMediaChannel() {
+  if (pendingNext && pendingSvgFile) {
+    const pendingState = getPendingSwapState(pendingNext, currentState);
+    const wantsObject = needsObjectChannel(pendingState, pendingSvgFile);
+    const pendingIsObject = pendingNext.tagName === "OBJECT";
+    if (wantsObject !== pendingIsObject) {
+      const file = pendingSvgFile;
+      cancelPendingSwap();
+      detachEyeTracking();
+      swapToFile(file, pendingState);
+      return true;
+    }
+  }
+  // A correctly-channelled pending swap already represents the newest state.
+  // Do not let the older displayed file cancel and replace it merely because
+  // that displayed element still needs a channel correction.
+  if (pendingNext) return false;
+  if (!clawdEl || !clawdEl.isConnected || !currentDisplayedSvg) return false;
+  const wantsObject = needsObjectChannel(currentDisplayedState, currentDisplayedSvg);
+  const currentIsObject = clawdEl.tagName === "OBJECT";
+  if (wantsObject === currentIsObject) return false;
+  cancelPendingSwap();
+  detachEyeTracking();
+  swapToFile(currentDisplayedSvg, currentDisplayedState);
+  return true;
+}
+
+function resolveLowPowerStaticImageOverride(state, file) {
+  if (!lowPowerIdleMode) return null;
+  const override = _lowPowerStaticImageOverrides && _lowPowerStaticImageOverrides[state];
+  if (!override || override.from !== file || !override.to) return null;
+  return override.to;
+}
+
+function hasLowPowerStaticImageOverride(state, file) {
+  const override = _lowPowerStaticImageOverrides && _lowPowerStaticImageOverrides[state];
+  return !!(override && override.from === file && override.to);
 }
 
 function shouldUseCloudlingPointerBridge(state, file) {
@@ -875,14 +1353,139 @@ function cancelReaction() {
   if (isDragReacting) {
     isDragReacting = false;
   }
+  currentDragSvg = null;
+  currentDragDirection = null;
 }
 
 // --- Drag reaction (loops while dragging) ---
+function normalizeDragDirection(direction) {
+  return direction === "left" || direction === "right" ? direction : null;
+}
+
+function usesDirectionalDragBridge(file) {
+  return !!(
+    file
+    && _dragSvgs.left === file
+    && _dragSvgs.right === file
+  );
+}
+
+function warnDirectionalDragBridgeOnce(reason) {
+  if (directionalDragBridgeWarnings.has(reason)) return;
+  directionalDragBridgeWarnings.add(reason);
+  console.warn(`Clawd: directional drag bridge unavailable (${reason}); keeping the fallback direction.`);
+}
+
+function applyDirectionalDragToObject(objectEl, direction, options = {}) {
+  const normalized = normalizeDragDirection(direction);
+  if (!normalized) return false;
+  const warn = options.warn === true;
+  if (!objectEl || objectEl.tagName !== "OBJECT") {
+    if (warn) warnDirectionalDragBridgeOnce("non-object media channel");
+    return false;
+  }
+  try {
+    const root = objectEl.contentDocument && objectEl.contentDocument.documentElement;
+    if (!root) {
+      if (warn) warnDirectionalDragBridgeOnce("contentDocument unavailable");
+      return false;
+    }
+    if (root.getAttribute("data-clawd-drag-directional") !== "v1") {
+      if (warn) warnDirectionalDragBridgeOnce("v1 marker missing");
+      return false;
+    }
+    if (root.getAttribute("data-clawd-drag-direction") !== normalized) {
+      root.setAttribute("data-clawd-drag-direction", normalized);
+    }
+    return true;
+  } catch {
+    if (warn) warnDirectionalDragBridgeOnce("contentDocument access denied");
+    return false;
+  }
+}
+
+function getCodexPetVisualForFile(file) {
+  if (!file) return null;
+  const basename = String(file).replace(/\\/g, "/").split("/").pop().split(/[?#]/, 1)[0];
+  return CODEX_PET_VISUAL_BY_FILE[basename] || null;
+}
+
+function getAssetDirectoryUrl(url) {
+  const value = String(url || "").replace(/\\/g, "/");
+  const slash = value.lastIndexOf("/");
+  return slash >= 0 ? value.slice(0, slash) : "";
+}
+
+function restartCodexPetVisualAnimation(root) {
+  if (!root || typeof root.getAnimations !== "function") return;
+  let animations = [];
+  try {
+    animations = root.getAnimations({ subtree: true });
+  } catch {
+    return;
+  }
+  for (const animation of animations) {
+    try {
+      animation.currentTime = 0;
+    } catch {}
+  }
+}
+
+function warnCodexPetVisualBridgeOnce(reason) {
+  if (codexPetVisualBridgeWarnings.has(reason)) return;
+  codexPetVisualBridgeWarnings.add(reason);
+  console.warn(`Clawd: Codex Pet visual bridge unavailable (${reason}); using a normal media swap.`);
+}
+
+function applyCodexPetVisualToObject(objectEl, file, options = {}) {
+  const visual = getCodexPetVisualForFile(file);
+  if (!visual) return false;
+  const warn = options.warn === true;
+  if (!objectEl || objectEl.tagName !== "OBJECT") {
+    if (warn) warnCodexPetVisualBridgeOnce("non-object media channel");
+    return false;
+  }
+  try {
+    const root = objectEl.contentDocument && objectEl.contentDocument.documentElement;
+    if (!root) {
+      if (warn) warnCodexPetVisualBridgeOnce("contentDocument unavailable");
+      return false;
+    }
+    if (root.getAttribute("data-clawd-codex-pet-visuals") !== "v1") {
+      if (warn) warnCodexPetVisualBridgeOnce("v1 marker missing");
+      return false;
+    }
+    const unchanged = root.getAttribute("data-clawd-codex-pet-visual") === visual;
+    if (!unchanged) root.setAttribute("data-clawd-codex-pet-visual", visual);
+    if (visual === "drag-directional") {
+      const direction = normalizeDragDirection(options.direction);
+      if (direction && root.getAttribute("data-clawd-drag-direction") !== direction) {
+        root.setAttribute("data-clawd-drag-direction", direction);
+      }
+    }
+    if (unchanged && options.restart === true) restartCodexPetVisualAnimation(root);
+    return true;
+  } catch {
+    if (warn) warnCodexPetVisualBridgeOnce("contentDocument access denied");
+    return false;
+  }
+}
+
 function startDragReaction(direction) {
   if (dndEnabled) return;
-  const dragSvg = (direction && _dragSvgs[direction]) || _dragSvg;
+  const normalizedDirection = normalizeDragDirection(direction);
+  const dragSvg = (normalizedDirection && _dragSvgs[normalizedDirection]) || _dragSvg;
   if (!dragSvg) return;
-  if (isDragReacting && currentDragSvg === dragSvg) return;
+  currentDragDirection = normalizedDirection;
+  if (isDragReacting && currentDragSvg === dragSvg) {
+    if (usesDirectionalDragBridge(dragSvg) && currentDisplayedSvg === dragSvg) {
+      applyDirectionalDragToObject(clawdEl, currentDragDirection, { warn: true });
+    }
+    if (usesDirectionalDragBridge(dragSvg) && pendingNext && pendingSvgFile === dragSvg) {
+      applyDirectionalDragToObject(pendingNext, currentDragDirection);
+    }
+    return;
+  }
 
   if (!isDragReacting && isReacting) {
     if (reactTimer) { clearTimeout(reactTimer); reactTimer = null; }
@@ -898,20 +1501,31 @@ function startDragReaction(direction) {
 }
 
 function endDragReaction() {
-  if (!isDragReacting) return;
+  const wasDragReacting = isDragReacting;
   isDragReacting = false;
   currentDragSvg = null;
+  currentDragDirection = null;
+  if (!wasDragReacting) return;
   window.electronAPI.resumeFromReaction();
 }
 
 // --- Generic swap function: handles both <object> and <img> channels ---
 let currentDisplayedSvg = getObjectSvgName(clawdEl);
+let currentDisplayedState = null;
 let currentDisplayedAssetUrl = null;
 let pendingSvgFile = null; // tracks the SVG currently being loaded (for dedup)
 let pendingAssetUrl = null;
 let activeSwapToken = 0;
 let swapVisibilityRescueTimer = null;
+let petVisualReadyNotified = false;
 currentIdleSvg = currentDisplayedSvg;
+
+function notifyPetVisualReadyOnce() {
+  if (petVisualReadyNotified) return;
+  if (!window.electronAPI || typeof window.electronAPI.notifyPetVisualReady !== "function") return;
+  petVisualReadyNotified = true;
+  window.electronAPI.notifyPetVisualReady();
+}
 
 /**
  * Swap to a new animation file.
@@ -930,7 +1544,7 @@ function fadeOutAndRemove(el, durationMs) {
 }
 
 function getPetMediaElements() {
-  return [...container.querySelectorAll("object, img.clawd-img")];
+  return [...mediaLayer.querySelectorAll("object.clawd-object, img.clawd-img")];
 }
 
 function isVisiblyOpaque(el) {
@@ -976,7 +1590,7 @@ function scheduleSwapVisibilityRescue(token, file, state) {
     if (hasVisiblePetElement()) return;
 
     if (pendingNext && pendingSvgFile === file) {
-      forceImageChannelReload(file, state);
+      forceImageChannelReload(file, getPendingSwapState(pendingNext, state));
       return;
     }
 
@@ -984,6 +1598,16 @@ function scheduleSwapVisibilityRescue(token, file, state) {
     forceImageChannelReload(file, state);
   }, getSwapVisibilityRescueDelay(file));
   swapVisibilityRescueTimer = timer;
+}
+
+function getPendingSwapState(next, fallbackState) {
+  if (
+    next
+    && Object.prototype.hasOwnProperty.call(next, "__clawdPendingState")
+  ) {
+    return next.__clawdPendingState;
+  }
+  return fallbackState;
 }
 
 function forceImageChannelReload(file, state, allowImageFallback = true) {
@@ -995,31 +1619,89 @@ function forceImageChannelReload(file, state, allowImageFallback = true) {
   return true;
 }
 
-function swapToFile(file, state, useObjectChannel, options = {}) {
-  const swapToken = ++activeSwapToken;
-  const allowImageFallback = options.allowImageFallback !== false;
-  if (pendingNext) {
-    if (pendingNext.tagName === "OBJECT") releaseObject(pendingNext);
-    else releaseImg(pendingNext);
+function cancelPendingSwap(reason = "superseded") {
+  const next = pendingNext;
+  if (!next) return false;
+  if (typeof next.__clawdSwapCancelled === "function") {
+    next.__clawdSwapCancelled(reason);
+  }
+  if (next.tagName === "OBJECT") releaseObject(next);
+  else releaseImg(next);
+  if (pendingNext === next) {
     pendingNext = null;
+    pendingSvgFile = null;
     pendingAssetUrl = null;
   }
+  return true;
+}
 
-  pendingSvgFile = file; // track what's loading for dedup
+function swapToFile(file, state, useObjectChannel, options = {}) {
+  const allowImageFallback = options.allowImageFallback !== false;
   const useObj = useObjectChannel !== undefined ? useObjectChannel : needsObjectChannel(state, file);
   const url = getAssetUrl(file);
+  const canReuseCodexPetDocument = useObj
+    && options.forceDocumentReload !== true
+    && currentDisplayedAssetUrl
+    && getAssetDirectoryUrl(currentDisplayedAssetUrl) === getAssetDirectoryUrl(url)
+    && applyCodexPetVisualToObject(clawdEl, file, {
+      direction: isDragReacting && currentDragSvg === file ? currentDragDirection : null,
+      restart: true,
+      warn: true,
+    });
+  if (canReuseCodexPetDocument) {
+    cancelPendingSwap();
+    clearSwapVisibilityRescueTimer();
+    currentDisplayedSvg = file;
+    currentDisplayedState = state;
+    currentDisplayedAssetUrl = url;
+    applyObjectScaleStyle(clawdEl, file, state);
+    applyPetTintToElement(clawdEl);
+    applyMiniFlip(clawdEl, state);
+    refreshAccessoryLayout();
+    notifyPetVisualReadyOnce();
+    if (state && tracksEyesForFile(state, file)) attachEyeTracking(clawdEl);
+    else detachEyeTracking();
+    if (miniLeftFlip) applyGlyphFlipCompensation(clawdEl);
+    scheduleLowPowerIdlePause();
+    if (typeof options.onReady === "function") options.onReady(clawdEl);
+    return;
+  }
+
+  const swapToken = ++activeSwapToken;
+  cancelPendingSwap();
+
+  pendingSvgFile = file; // track what's loading for dedup
   pendingAssetUrl = url;
 
   if (useObj) {
     // Object channel: <object type="image/svg+xml">
     const next = document.createElement("object");
     next.type = "image/svg+xml";
+    next.className = "clawd-object";
     next.id = "clawd";
     next.style.opacity = "0";
+    next.__clawdPendingState = state;
     applyObjectScaleStyle(next, file, state);
+    applyPetTintToElement(next);
+    let swapCallbackSettled = false;
+    const finishSwapReady = () => {
+      if (swapCallbackSettled) return;
+      swapCallbackSettled = true;
+      next.__clawdSwapCancelled = null;
+      if (typeof options.onReady === "function") options.onReady(next);
+    };
+    const finishSwapError = (reason) => {
+      if (swapCallbackSettled) return;
+      swapCallbackSettled = true;
+      next.__clawdSwapCancelled = null;
+      if (typeof options.onError === "function") options.onError(reason);
+    };
+    next.__clawdSwapCancelled = finishSwapError;
 
     const swap = () => {
       if (pendingNext !== next) return;
+      const commitState = getPendingSwapState(next, state);
+      if (deferSwapUntilAccessorySettles(file, commitState, next, swap)) return;
       if (swapToken === activeSwapToken) clearSwapVisibilityRescueTimer();
       const fadeInMs = (_transitions[file] && _transitions[file].in) || 0;
       const fadeOutMs = (currentDisplayedSvg && _transitions[currentDisplayedSvg] && _transitions[currentDisplayedSvg].out) || 0;
@@ -1030,9 +1712,12 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       } else {
         next.style.transition = "none";
       }
+      if (isDragReacting && currentDragSvg === file && usesDirectionalDragBridge(file)) {
+        applyDirectionalDragToObject(next, currentDragDirection, { warn: true });
+      }
       next.style.opacity = "1";
 
-      for (const child of [...container.querySelectorAll("object, img.clawd-img")]) {
+      for (const child of [...mediaLayer.querySelectorAll("object.clawd-object, img.clawd-img")]) {
         if (child !== next) {
           if (fadeOutMs > 0) fadeOutAndRemove(child, fadeOutMs);
           else if (child.tagName === "OBJECT") releaseObject(child);
@@ -1044,11 +1729,13 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       pendingAssetUrl = null;
       clawdEl = next;
       currentDisplayedSvg = file;
+      currentDisplayedState = commitState;
       currentDisplayedAssetUrl = url;
-      applyPetTint();
-      injectAccessory(next.contentDocument);
+      applyMiniFlip(next, commitState);
+      refreshAccessoryLayout();
+      notifyPetVisualReadyOnce();
 
-      if (state && needsEyeTracking(state)) {
+      if (commitState && tracksEyesForFile(commitState, file)) {
         attachEyeTracking(next);
       }
       if (miniLeftFlip) applyGlyphFlipCompensation(next);
@@ -1056,6 +1743,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
         callCloudlingPointerBridge(next, getDisplayedCloudlingPointerPayload(lastCloudlingPointerPayload));
       }
       scheduleLowPowerIdlePause();
+      finishSwapReady();
     };
 
     next.addEventListener("load", swap, { once: true });
@@ -1067,18 +1755,22 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
     // /pendingAssetUrl) stays keyed on the base `url`, not the busted one.
     const cacheBust = `${Date.now()}-${++_imgCacheBustSeq}`;
     next.data = `${url}${url.includes("?") ? "&" : "?"}_t=${cacheBust}`;
-    container.appendChild(next);
+    mediaLayer.appendChild(next);
     pendingNext = next;
     scheduleSwapVisibilityRescue(swapToken, file, state);
     setTimeout(() => {
       if (pendingNext !== next) return;
       try {
         if (!next.contentDocument) {
+          const retryState = getPendingSwapState(next, state);
           releaseObject(next);
-          pendingNext = null;
-          pendingSvgFile = null;
-          pendingAssetUrl = null;
-          forceImageChannelReload(file, state, allowImageFallback);
+          if (pendingNext === next) {
+            pendingNext = null;
+            pendingSvgFile = null;
+            pendingAssetUrl = null;
+          }
+          finishSwapError("object-document-unavailable");
+          if (!pendingNext) forceImageChannelReload(file, retryState, allowImageFallback);
           return;
         }
       } catch {}
@@ -1090,11 +1782,14 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
     next.className = "clawd-img";
     next.id = "clawd";
     next.style.opacity = "0";
+    next.__clawdPendingState = state;
     applyObjectScaleStyle(next, file, state);
-    applyMiniFlip(next, state);
+    applyPetTintToElement(next);
 
     const swap = () => {
       if (pendingNext !== next) return;
+      const commitState = getPendingSwapState(next, state);
+      if (deferSwapUntilAccessorySettles(file, commitState, next, swap)) return;
       if (swapToken === activeSwapToken) clearSwapVisibilityRescueTimer();
       const fadeInMs = (_transitions[file] && _transitions[file].in) || 0;
       const fadeOutMs = (currentDisplayedSvg && _transitions[currentDisplayedSvg] && _transitions[currentDisplayedSvg].out) || 0;
@@ -1107,7 +1802,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       }
       next.style.opacity = "1";
 
-      for (const child of [...container.querySelectorAll("object, img.clawd-img")]) {
+      for (const child of [...mediaLayer.querySelectorAll("object.clawd-object, img.clawd-img")]) {
         if (child !== next) {
           if (fadeOutMs > 0) fadeOutAndRemove(child, fadeOutMs);
           else if (child.tagName === "OBJECT") releaseObject(child);
@@ -1119,8 +1814,11 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
       pendingAssetUrl = null;
       clawdEl = next;
       currentDisplayedSvg = file;
+      currentDisplayedState = commitState;
       currentDisplayedAssetUrl = url;
-      applyPetTint();
+      applyMiniFlip(next, commitState);
+      refreshAccessoryLayout();
+      notifyPetVisualReadyOnce();
       scheduleLowPowerIdlePause();
     };
 
@@ -1137,7 +1835,7 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
     // HTTP cache; only the in-memory SVG document is rebuilt.
     const cacheBust = `${Date.now()}-${++_imgCacheBustSeq}`;
     next.src = `${url}${url.includes("?") ? "&" : "?"}_t=${cacheBust}`;
-    container.appendChild(next);
+    mediaLayer.appendChild(next);
     pendingNext = next;
     scheduleSwapVisibilityRescue(swapToken, file, state);
     // Timeout fallback for images that fail to load
@@ -1148,69 +1846,99 @@ function swapToFile(file, state, useObjectChannel, options = {}) {
   }
 }
 
-// --- State change → switch animation (preload + instant swap) ---
-window.electronAPI.onStateChange((state, svg) => {
+function renderStateFile(state, svg) {
   // Main process state change → cancel any active click reaction
   cancelReaction();
   // Track the latest state name so the Kimi permission pulse can re-trigger
   // swapToFile() with the matching state for eye-tracking decisions.
   currentState = state;
+  currentRequestedSvg = svg;
+  const requestedSvg = svg;
+  const lowPowerStaticImageOverride = resolveLowPowerStaticImageOverride(state, requestedSvg);
+  const effectiveSvg = lowPowerStaticImageOverride || requestedSvg;
   noteLowPowerActivity();
 
   // ── Roam state: add walk animation class for visual movement ──
   // When the pet is roaming (free-roam mode), add a CSS animation to simulate
   // walking even if the theme doesn't have a dedicated roam SVG. The animation
   // is a subtle horizontal bob that makes the idle SVG look like it's walking.
+  // Themes with a dedicated roam visual animate themselves — no bob on top.
   if (container) {
-    container.classList.toggle("roam-walk", state === "roam");
+    container.classList.toggle("roam-walk", state === "roam" && !_hasRoamVisual);
   }
 
-  if (!shouldUseCloudlingPointerBridge(state, svg)) {
+  if (!shouldUseCloudlingPointerBridge(state, effectiveSvg)) {
     clearCloudlingPointerBridge();
   }
 
   // Dedup only when the same file resolves to the same asset URL. Imported
   // Codex Pet themes reuse filenames, so filename-only dedup can keep showing
   // the previous theme until a drag/click forces a different animation.
-  const desiredObjectChannel = needsObjectChannel(state, svg);
-  const desiredAssetUrl = getAssetUrl(svg);
+  const desiredObjectChannel = lowPowerStaticImageOverride ? false : needsObjectChannel(state, effectiveSvg);
+  const desiredAssetUrl = getAssetUrl(effectiveSvg);
   const alreadyDisplayed = clawdEl && clawdEl.isConnected
-    && currentDisplayedSvg === svg
+    && currentDisplayedSvg === effectiveSvg
     && currentDisplayedAssetUrl === desiredAssetUrl;
   const displayedChannelMatches = !alreadyDisplayed || ((clawdEl.tagName === "OBJECT") === desiredObjectChannel);
-  const alreadyPending = pendingSvgFile === svg
+  const alreadyPending = pendingSvgFile === effectiveSvg
     && pendingNext
     && pendingAssetUrl === desiredAssetUrl;
   const pendingChannelMatches = !alreadyPending || ((pendingNext.tagName === "OBJECT") === desiredObjectChannel);
 
+  if (alreadyPending && !pendingChannelMatches) {
+    cancelPendingSwap();
+  }
+
   if ((alreadyDisplayed && displayedChannelMatches) || (alreadyPending && pendingChannelMatches)) {
+    // Same file, no swap — but the flip is state-dependent (mini flip vs roam
+    // heading), so re-apply it for the incoming state. E.g. a leftward roam
+    // entering mini pre-entry reuses the same crabwalk asset; without this the
+    // roam mirror would leak into the mini entry (and vice versa).
     if (alreadyDisplayed) {
-      if (needsEyeTracking(state) && !eyeTarget && !_trackingLayers) {
+      currentDisplayedState = state;
+      applyMiniFlip(clawdEl, state);
+      refreshAccessoryLayout();
+    }
+    if (alreadyPending && pendingChannelMatches) {
+      // The file/channel can be reused while its state-dependent presentation
+      // cannot. Retarget the pending commit so its eventual direction,
+      // attachment descriptor, layout, and eye-tracking decision all use the
+      // newest state rather than the state captured when loading began.
+      pendingNext.__clawdPendingState = state;
+      applyObjectScaleStyle(pendingNext, effectiveSvg, state);
+    }
+    if (alreadyDisplayed) {
+      if (tracksEyesForFile(state, effectiveSvg) && !eyeTarget && !_trackingLayers) {
         if (clawdEl.tagName === "OBJECT") attachEyeTracking(clawdEl);
-      } else if (!needsEyeTracking(state)) {
+      } else if (!tracksEyesForFile(state, effectiveSvg)) {
         detachEyeTracking();
       }
-      if (shouldUseCloudlingPointerBridge(state, svg) && lastCloudlingPointerPayload) {
+      if (shouldUseCloudlingPointerBridge(state, effectiveSvg) && lastCloudlingPointerPayload) {
         applyCloudlingPointerBridge(lastCloudlingPointerPayload);
       }
       scheduleLowPowerIdlePause();
     }
-    currentIdleSvg = svg;
+    currentIdleSvg = effectiveSvg;
     return;
   }
 
   // Different file — cancel pending, detach, and swap
-  if (pendingNext) {
-    if (pendingNext.tagName === "OBJECT") releaseObject(pendingNext);
-    else releaseImg(pendingNext);
-    pendingNext = null;
-    pendingSvgFile = null;
-    pendingAssetUrl = null;
-  }
+  cancelPendingSwap();
   detachEyeTracking();
 
-  swapToFile(svg, state);
-  currentIdleSvg = svg;
+  swapToFile(effectiveSvg, state, lowPowerStaticImageOverride ? false : undefined);
+  currentIdleSvg = effectiveSvg;
+}
+
+function refreshCurrentStateForLowPowerStaticImage() {
+  if (!currentState || !currentRequestedSvg) return;
+  if (!hasLowPowerStaticImageOverride(currentState, currentRequestedSvg)) return;
+  renderStateFile(currentState, currentRequestedSvg);
+}
+
+// --- State change → switch animation (preload + instant swap) ---
+window.electronAPI.onStateChange((state, svg) => {
+  renderStateFile(state, svg);
 });
 
 // Kimi CLI permission hold: re-trigger the current animation so it loops
@@ -1437,6 +2165,7 @@ function _cleanupLayeredTracking() {
   _layerTargetDx = 0;
   _layerTargetDy = 0;
   _layeredTrackingObj = null;
+  _layeredTrackingDocument = null;
 }
 
 // ── Attach / Detach (dispatches to correct system) ──
@@ -1455,7 +2184,7 @@ function attachEyeTracking(objectEl) {
     try {
       const svgDoc = objectEl.contentDocument;
       if (!svgDoc) {
-        if (attempt < 60) setTimeout(() => tryAttach(attempt + 1), 16);
+        if (attempt < EYE_ATTACH_MAX_ATTEMPTS) setTimeout(() => tryAttach(attempt + 1), EYE_ATTACH_RETRY_MS);
         return;
       }
 
@@ -1465,6 +2194,7 @@ function attachEyeTracking(objectEl) {
         if (_trackingLayers && _layeredTrackingObj === objectEl) return;
         _initLayeredTracking(svgDoc);
         _layeredTrackingObj = objectEl;
+        _layeredTrackingDocument = svgDoc;
         return;
       }
 
@@ -1482,11 +2212,11 @@ function attachEyeTracking(objectEl) {
       return;
     }
 
-    if (attempt >= 60) {
+    if (attempt >= EYE_ATTACH_MAX_ATTEMPTS) {
       console.warn("Timed out waiting for SVG eye targets");
       return;
     }
-    setTimeout(() => tryAttach(attempt + 1), 16);
+    setTimeout(() => tryAttach(attempt + 1), EYE_ATTACH_RETRY_MS);
   };
 
   tryAttach(0);
@@ -1502,13 +2232,193 @@ function detachEyeTracking() {
   _cleanupLayeredTracking();
 }
 
+function isEyeTrackingReady() {
+  if (!clawdEl || clawdEl.tagName !== "OBJECT" || !clawdEl.isConnected) return false;
+  let currentDocument = null;
+  try {
+    currentDocument = clawdEl.contentDocument;
+  } catch {
+    return false;
+  }
+  if (!currentDocument) return false;
+  if (_trackingLayers && _layeredTrackingObj === clawdEl) {
+    return _layeredTrackingDocument === currentDocument;
+  }
+  return !!(eyeTarget
+    && eyeTarget.ownerDocument === currentDocument
+    && eyeTarget.ownerDocument.defaultView);
+}
+
+function waitForWakeEyeTrackingReady(callback, attempt = 0) {
+  if (isEyeTrackingReady()) {
+    callback(true);
+    return;
+  }
+  if (attempt >= EYE_ATTACH_MAX_ATTEMPTS) {
+    callback(false);
+    return;
+  }
+  setTimeout(() => waitForWakeEyeTrackingReady(callback, attempt + 1), EYE_ATTACH_RETRY_MS);
+}
+
+function reportSystemWakeStatus(status) {
+  if (window.electronAPI && typeof window.electronAPI.reportSystemWakeStatus === "function") {
+    window.electronAPI.reportSystemWakeStatus(status);
+  }
+}
+
+function finishSystemWake(status) {
+  pendingSystemWakeId = null;
+  lastSystemWakeId = status.id;
+  lastSystemWakeStatus = status;
+  reportSystemWakeStatus(status);
+  if (queuedSystemWakePayload && !queuedSystemWakeReplayTimer) {
+    queuedSystemWakeReplayTimer = setTimeout(() => {
+      queuedSystemWakeReplayTimer = null;
+      const payload = queuedSystemWakePayload;
+      queuedSystemWakePayload = null;
+      if (payload) recoverFromSystemWake(payload);
+    }, 0);
+  }
+}
+
+function recoverFromSystemWake(payload) {
+  const id = payload && typeof payload.id === "string" ? payload.id : "";
+  if (!id || id.length > 96) return;
+  if (id === lastSystemWakeId && lastSystemWakeStatus) {
+    reportSystemWakeStatus(lastSystemWakeStatus);
+    return;
+  }
+  if (pendingSystemWakeId || queuedSystemWakeReplayTimer) {
+    if (id !== pendingSystemWakeId) queuedSystemWakePayload = payload;
+    return;
+  }
+
+  const rootBefore = getCurrentSvgRoot();
+  const lowPowerWasPaused = lowPowerSvgPaused || hasLowPowerPauseStyle(rootBefore);
+  const eyeTargetWasCurrentDocument = isEyeTrackingReady();
+
+  // Do this even when the local mirror says false: the injected pause style or
+  // the embedded SVG timeline can outlive that boolean across a system sleep.
+  resumeCurrentSvgForLowPower();
+  if (lowPowerIdleMode) scheduleLowPowerIdlePause();
+
+  const needsEyes = tracksEyesForFile(currentState, currentDisplayedSvg);
+  const shouldReloadEyeObject = lowPowerIdleMode
+    && needsEyes
+    && clawdEl
+    && clawdEl.tagName === "OBJECT"
+    && currentDisplayedSvg;
+
+  if (shouldReloadEyeObject) {
+    const wakeContext = {
+      id,
+      wakeState: currentState,
+      wakeSvg: currentDisplayedSvg,
+      lowPowerWasPaused,
+      pauseStyleRemoved: !hasLowPowerPauseStyle(),
+      eyeTargetWasCurrentDocument,
+    };
+
+    const finishWakeEyeObjectReload = (objectEl) => {
+      waitForWakeEyeTrackingReady((eyeTrackingReady) => {
+        if (pendingSystemWakeId !== wakeContext.id) return;
+        const stillCurrentWakeObject = clawdEl === objectEl
+          && currentDisplayedSvg === wakeContext.wakeSvg
+          && currentState === wakeContext.wakeState;
+        const ready = stillCurrentWakeObject && eyeTrackingReady;
+        finishSystemWake({
+          id: wakeContext.id,
+          result: ready ? "resumed" : "error",
+          lowPowerWasPaused: wakeContext.lowPowerWasPaused,
+          pauseStyleRemoved: wakeContext.pauseStyleRemoved,
+          eyeTrackingReady: ready,
+          eyeTargetWasCurrentDocument: wakeContext.eyeTargetWasCurrentDocument,
+          objectReloaded: stillCurrentWakeObject,
+          eyeTargetRebound: ready,
+        });
+      });
+    };
+
+    const failWakeEyeObjectReload = () => {
+      if (pendingSystemWakeId !== wakeContext.id) return;
+      if (clawdEl && clawdEl.tagName === "OBJECT" && clawdEl.isConnected) {
+        attachEyeTracking(clawdEl);
+      }
+      const eyeTrackingReady = isEyeTrackingReady();
+      finishSystemWake({
+        id: wakeContext.id,
+        result: "error",
+        lowPowerWasPaused: wakeContext.lowPowerWasPaused,
+        pauseStyleRemoved: wakeContext.pauseStyleRemoved,
+        eyeTrackingReady,
+        eyeTargetWasCurrentDocument: wakeContext.eyeTargetWasCurrentDocument,
+        objectReloaded: false,
+        eyeTargetRebound: !wakeContext.eyeTargetWasCurrentDocument && eyeTrackingReady,
+      });
+    };
+
+    const reloadWakeObject = (reloadAttempt = 0) => {
+      if (pendingSystemWakeId !== wakeContext.id) return;
+      if (currentState !== wakeContext.wakeState || currentDisplayedSvg !== wakeContext.wakeSvg) {
+        failWakeEyeObjectReload();
+        return;
+      }
+      swapToFile(wakeContext.wakeSvg, wakeContext.wakeState, true, {
+        allowImageFallback: false,
+        forceDocumentReload: true,
+        onReady: finishWakeEyeObjectReload,
+        onError: (reason) => {
+          if (pendingSystemWakeId !== wakeContext.id) return;
+          if (reason === "object-document-unavailable" && reloadAttempt < WAKE_OBJECT_RELOAD_RETRIES) {
+            reloadWakeObject(reloadAttempt + 1);
+            return;
+          }
+          failWakeEyeObjectReload();
+        },
+      });
+    };
+
+    pendingSystemWakeId = id;
+    detachEyeTracking();
+    reloadWakeObject();
+    return;
+  }
+
+  if (needsEyes && !isEyeTrackingReady() && clawdEl && clawdEl.tagName === "OBJECT") {
+    detachEyeTracking();
+    attachEyeTracking(clawdEl);
+  }
+
+  const status = {
+    id,
+    result: rootBefore ? "resumed" : "no-svg",
+    lowPowerWasPaused,
+    pauseStyleRemoved: !hasLowPowerPauseStyle(),
+    eyeTrackingReady: !needsEyes || isEyeTrackingReady(),
+    eyeTargetWasCurrentDocument,
+    objectReloaded: false,
+    eyeTargetRebound: needsEyes && !eyeTargetWasCurrentDocument && isEyeTrackingReady(),
+  };
+  finishSystemWake(status);
+}
+
 window.electronAPI.onEyeMove((dx, dy) => {
   const effectiveDx = miniLeftFlip ? -dx : dx;
   lastEyeDx = effectiveDx;
   lastEyeDy = dy;
 
+  if (lowPowerIdleMode) noteLowPowerActivity();
+
   if (shouldSuppressPassiveTrackingForLowPower()) {
     _cancelLayerAnimLoop();
+    return;
+  }
+
+  if ((eyeTarget || _trackingLayers) && !isEyeTrackingReady()) {
+    detachEyeTracking();
+    if (clawdEl && clawdEl.isConnected && clawdEl.tagName === "OBJECT"
+      && tracksEyesForFile(currentState, currentDisplayedSvg)) attachEyeTracking(clawdEl);
     return;
   }
 
@@ -1521,20 +2431,27 @@ window.electronAPI.onEyeMove((dx, dy) => {
   }
 
   // Single-target tracking (legacy)
-  // Detect stale eye targets (e.g. after DWM z-order recovery invalidates contentDocument)
-  if (eyeTarget && !eyeTarget.ownerDocument?.defaultView) {
-    eyeTarget = null;
-    bodyTarget = null;
-    shadowTarget = null;
-    if (clawdEl && clawdEl.isConnected && clawdEl.tagName === "OBJECT") attachEyeTracking(clawdEl);
-    return;
-  }
   applyEyeMove(effectiveDx, dy);
 });
+
+if (window.electronAPI && typeof window.electronAPI.onSystemWake === "function") {
+  window.electronAPI.onSystemWake(recoverFromSystemWake);
+}
 
 if (window.electronAPI && typeof window.electronAPI.onCloudlingPointer === "function") {
   window.electronAPI.onCloudlingPointer((payload) => {
     applyCloudlingPointerBridge(payload);
+  });
+}
+
+if (window.electronAPI && typeof window.electronAPI.onRoamHeading === "function") {
+  window.electronAPI.onRoamHeading((headingLeft) => {
+    _roamHeadingLeft = !!headingLeft;
+    // Re-apply in place: consecutive walks reuse the displayed roam visual
+    // without a swap, and if this message lands after the state-change (IPC
+    // order across channels is not contractual) the flip captured at IMG
+    // creation is stale — refresh both the on-screen and the pending element.
+    applyMiniFlip(clawdEl, currentState);
   });
 }
 
@@ -1644,7 +2561,7 @@ window.electronAPI.onWakeFromDoze(() => {
 });
 
 // --- Initial frame: always go through swapToFile so the right channel and theme scaling apply ---
-if (!currentDisplayedSvg && _idleFollowSvg) {
-  currentIdleSvg = _idleFollowSvg;
-  swapToFile(_idleFollowSvg, "idle");
+if (!currentDisplayedSvg && _initialIdleSvg) {
+  currentIdleSvg = _initialIdleSvg;
+  swapToFile(_initialIdleSvg, "idle");
 }

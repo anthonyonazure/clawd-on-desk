@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/tray-icon.png" width="128" alt="Clawd">
+  <img src="assets/icon.png" width="128" alt="Clawd">
 </p>
 <h1 align="center">Clawd on Desk</h1>
 <p align="center">
@@ -28,7 +28,7 @@ Clawd는 당신의 데스크톱 위에서 살며, AI 코딩 에이전트가 지�
 
 프롬프트를 입력하면 생각하고, 도구가 실행되면 타이핑하고, 서브에이전트가 생기면 헤드폰 그루브나 세 개 공 저글링으로 반응하고, 권한 요청이 오면 카드로 알려 주고, 작업이 끝나면 기뻐하고, 자리를 비우면 잠이 듭니다. 기본 테마로 **Clawd**(픽셀 크랩), **Calico**(삼색 고양이), **Cloudling**(云宝)이 포함되어 있으며, 커스텀 테마와 가져온 Codex Pet 애니메이션 팩도 지원합니다.
 
-> Windows 11, macOS, Ubuntu/Linux를 지원합니다. Windows 릴리스는 x64와 ARM64 설치 파일을 별도로 제공합니다. 소스에서 실행하려면 Node.js가 필요합니다. **Claude Code**, **Codex CLI**, **Copilot CLI**, **Gemini CLI**, **Antigravity CLI (agy)**, **Cursor Agent**, **CodeBuddy**, **Kiro CLI**, **Kimi Code CLI (Kimi-CLI)**, **Qwen Code**, **opencode**, **Pi**, **OpenClaw**, **Hermes Agent**, **Qoder**와 함께 동작합니다.
+> Windows 11, macOS, Ubuntu/Linux를 지원합니다. Windows 릴리스는 x64와 ARM64 설치 파일을 별도로 제공합니다. 소스에서 실행하려면 Node.js가 필요합니다. **Claude Code**, **Codex CLI**, **Copilot CLI**, **Gemini CLI**, **Antigravity CLI (agy)**, **Cursor Agent**, **CodeBuddy**, **WorkBuddy**, **Kiro CLI**, **Kimi Code CLI (Kimi-CLI)**, **Qwen Code**, **CodeWhale**, **opencode**, **MiMo Code**, **Pi**, **OpenClaw**, **Hermes Agent**, **Qoder**, **QoderWork**, **Reasonix CLI**와 함께 동작합니다.
 
 ## 기능
 
@@ -40,10 +40,13 @@ Clawd는 당신의 데스크톱 위에서 살며, AI 코딩 에이전트가 지�
 - **Antigravity CLI (agy)** — `~/.gemini/config/hooks.json`의 command hook 지원 (Antigravity config가 있으면 Clawd 시작 시 자동 등록되며, `npm run install:antigravity-hooks`로 수동 설치 가능). **상태만 동기화**되며, Clawd는 agy 권한 말풍선을 띄우지 않습니다. Allow / Deny / Always-allow 선택은 agy 자체 터미널 메뉴에서 처리합니다.
 - **Cursor Agent** — `~/.cursor/hooks.json`의 [Cursor IDE hooks](https://cursor.com/docs/agent/hooks) 지원 (Clawd 시작 시 자동 등록되며, `npm run install:cursor-hooks`로 수동 설치 가능)
 - **CodeBuddy** — Claude Code 호환 command hook + HTTP permission hook을 `~/.codebuddy/settings.json`에 등록합니다 (Clawd 시작 시 자동 등록되며, `node hooks/codebuddy-install.js`로 수동 설치 가능)
+- **사용자 지정 HTTP Agent** — Settings에서 다른 로컬 앱을 등록한 뒤 앱이나 adapter가 Clawd의 동적 `/state` 엔드포인트로 이벤트를 전송합니다. 등록만으로 hook이 설치되지는 않으며 v1은 상태 전용입니다. 자세한 내용은 [사용자 지정 HTTP Agent 가이드](docs/guides/custom-agent-http.md)를 참고하세요.
+- **WorkBuddy** — `~/.workbuddy-ai/settings.json`(현재) 또는 `~/.workbuddy/settings.json`(레거시)의 Claude Code 호환 command hook을 사용합니다 (Settings → Agents에서 설치하거나 `node hooks/workbuddy-install.js` 실행). 상태와 Notification만 동기화하며 권한 결정은 WorkBuddy의 기본 GUI에 남습니다.
 - **Kiro CLI** — `~/.kiro/agents/` 아래 커스텀 agent 설정에 command hook을 주입하고, 추가로 `clawd` agent를 자동 생성합니다. Clawd가 시작될 때마다 Kiro 기본 `kiro_default`에서 다시 동기화되므로 `kiro-cli --agent clawd` 또는 `/agent swap clawd`로 비교적 원본 동작을 유지한 채 hook을 켤 수 있습니다. 상태 hook은 macOS와 Windows에서 검증되었습니다.
 - **Kimi Code CLI (Kimi-CLI)** — `~/.kimi/config.toml`의 command hook(`[[hooks]]` 항목)을 사용합니다. Clawd 시작 시 자동 등록되며, `npm run install:kimi-hooks`로 수동 설치할 수도 있습니다.
 - **Qwen Code** — `~/.qwen/settings.json`의 command hook을 사용합니다 (Clawd 시작 시 자동 등록되며, `npm run install:qwen-hooks`로 수동 설치 가능). 상태 추적과 Qwen `PermissionRequest` 데스크톱 권한 말풍선을 지원합니다.
-- **opencode** — `~/.config/opencode/opencode.json`의 [플러그인 연동](https://opencode.ai/docs/plugins) 지원 (Clawd 시작 시 자동 등록). 지연 없는 이벤트 스트리밍, 허용/항상 허용/거부 권한 말풍선, `task` 도구로 병렬 서브에이전트를 띄울 때의 building 애니메이션까지 포함합니다.
+- **opencode** — `~/.config/opencode/opencode.json`의 선택적 [플러그인 연동](https://opencode.ai/docs/plugins)입니다 (Settings → Agents에서 설치). 지연 없는 이벤트 스트리밍과 허용/항상 허용/거부 권한 말풍선을 지원합니다. `task` 하위 세션은 headless이므로 표시되는 다중 세션 애니메이션 집계에 참여하지 않습니다.
+- **MiMo Code** — `~/.config/mimocode/mimocode.jsonc`의 선택적 [플러그인 연동](https://opencode.ai/docs/plugins)입니다 (Settings → Agents에서 설치하거나 `node hooks/mimocode-install.js` 실행). opencode와 동일한 `@mimo-ai/plugin` SDK 및 권한 동작을 공유하며 `task` 하위 세션도 headless입니다.
 - **Pi** — `~/.pi/agent/extensions/clawd-on-desk`의 전역 extension으로 연동됩니다 (Clawd 시작 시 자동 등록되며, `npm run install:pi-extension`으로 수동 설치 가능). 인터랙티브 Pi 세션의 라이프사이클과 도구 활동 상태만 보고하며, Pi의 기본 YOLO 동작을 유지합니다.
 - **OpenClaw** — `~/.openclaw/openclaw.json`의 plugin 경로로 상태만 연동합니다 (OpenClaw config가 이미 있으면 Clawd 시작 시 자동 등록되며, `npm run install:openclaw-plugin`으로 수동 설치 가능). Phase 1은 로컬 `openclaw tui --local` 세션의 애니메이션만 지원하며, 권한 말풍선과 터미널 포커스는 지원하지 않습니다.
 - **Hermes Agent** — Hermes의 관리형 plugin 디렉터리를 통한 [plugin 연동](https://hermes-agent.org/) (Hermes가 설치되어 있으면 Clawd 시작 시 자동 등록되며, `npm run install:hermes-plugin`으로 수동 설치 가능). 상태, 세션, SessionEnd, 터미널 포커스를 지원합니다.
@@ -61,7 +64,7 @@ Clawd는 당신의 데스크톱 위에서 살며, AI 코딩 에이전트가 지�
 - **미니 모드** — 화면 오른쪽 끝으로 드래그하거나 우클릭 후 `Mini Mode`를 선택하면 화면 가장자리에 숨어 있다가 마우스를 올리면 살짝 튀어나옵니다. 미니 알림/축하 애니메이션과 포물선 점프 전환도 지원합니다.
 
 ### 권한 말풍선
-- **앱 내 권한 검토** — Claude Code, Codex CLI, CodeBuddy, opencode가 도구 권한을 요청하면 터미널을 기다리는 대신 Clawd가 떠 있는 카드 형태의 말풍선을 띄웁니다.
+- **앱 내 권한 검토** — Claude Code, Codex CLI, CodeBuddy, opencode, MiMo Code가 도구 권한을 요청하면 터미널을 기다리는 대신 Clawd가 떠 있는 카드 형태의 말풍선을 띄웁니다.
 - **Allow / Deny / 에이전트별 추가 동작** — 한 번의 클릭으로 승인/거절할 수 있고, 에이전트가 지원하면 권한 규칙이나 `Always` 같은 추가 동작도 표시됩니다.
 - **전역 단축키** — 최신 권한 말풍선에 대해 `Ctrl+Shift+Y`로 허용, `Ctrl+Shift+N`으로 거부할 수 있습니다. 단, 말풍선이 보일 때만 등록됩니다.
 - **스택 레이아웃** — 여러 권한 요청이 화면 오른쪽 아래에서 위로 차곡차곡 쌓입니다.
@@ -88,7 +91,7 @@ Clawd는 당신의 데스크톱 위에서 살며, AI 코딩 에이전트가 지�
 - **위치 기억** — 재시작 후에도 마지막 위치를 기억합니다. 미니 모드 위치도 포함됩니다.
 - **단일 인스턴스 잠금** — Clawd 창이 중복 실행되지 않도록 막습니다.
 - **자동 시작** — Claude Code의 SessionStart hook이 Clawd가 실행 중이 아니어도 자동으로 켤 수 있습니다.
-- **방해 금지 모드** — 우클릭 또는 트레이 메뉴로 sleep 모드에 들어가면, 깰 때까지 모든 hook 이벤트가 음소거됩니다. DND 동안에는 권한 말풍선이 뜨지 않으며, Codex와 opencode는 기본 프롬프트로 돌아가고, Claude Code와 CodeBuddy는 자체 권한 확인 흐름으로 되돌아갑니다. Antigravity와 Pi는 상태만 동기화합니다.
+- **방해 금지 모드** — 우클릭 또는 트레이 메뉴로 sleep 모드에 들어가면, 깰 때까지 모든 hook 이벤트가 음소거됩니다. DND 동안에는 권한 말풍선이 뜨지 않으며, Codex, opencode, MiMo Code는 기본 프롬프트로 돌아가고, Claude Code와 CodeBuddy는 자체 권한 확인 흐름으로 되돌아갑니다. Antigravity와 Pi는 상태만 동기화합니다.
 - **효과음** — 작업 완료나 권한 요청 시 짧은 오디오 알림이 재생됩니다. 우클릭 메뉴에서 켜고 끌 수 있으며, 10초 쿨다운이 있고 DND에서는 자동 음소거됩니다.
 - **시스템 트레이** — 크기 조절(S/M/L), DND, 언어 전환, 자동 시작, 업데이트 확인 등을 지원합니다.
 - **i18n** — 영어, 중국어 간체, 중국어 번체, 한국어, 일본어 UI를 지원하며, 우클릭 메뉴나 트레이에서 전환할 수 있습니다.
@@ -155,7 +158,7 @@ npm install
 npm start
 ```
 
-**Claude Code**, **Codex CLI**, **Copilot CLI**는 바로 사용할 수 있습니다. **Gemini CLI**, **Antigravity CLI (agy)**, **Cursor Agent**, **CodeBuddy**, **Kiro CLI**, **Kimi Code CLI (Kimi-CLI)**, **Qwen Code**, **opencode**, **Pi**, **OpenClaw**, **Hermes Agent**, **Qoder**는 설치 및 초기화되어 있다면 Clawd 시작 시 자동 등록됩니다. 원격 SSH, WSL, 플랫폼별 참고 사항(macOS / Linux)까지 포함된 가이드는 **[docs/guides/setup-guide.md](docs/guides/setup-guide.md)** 를 참고하세요.
+**Claude Code**와 **Codex CLI**는 기본적으로 hook이 동기화됩니다. 다른 Agent는 먼저 **Settings → Agents**에서 해당 integration을 설치해야 하며, 설치되어 있고 활성화된 integration만 Clawd 시작 시 계속 동기화됩니다. 원격 SSH, WSL, 플랫폼별 참고 사항(macOS / Linux)까지 포함된 가이드는 **[docs/guides/setup-guide.md](docs/guides/setup-guide.md)** 를 참고하세요.
 
 `Codex + WSL`의 공식 현황, Clawd의 현재 구현 경계, 그리고 왜 이 부분이 오해되기 쉬운지는 **[docs/guides/codex-wsl-clarification.ko-KR.md](docs/guides/codex-wsl-clarification.ko-KR.md)** 를 참고하세요.
 
@@ -302,6 +305,42 @@ Clawd를 더 좋게 만드는 데 도움을 준 모든 분들께 감사합니다
   </tr>
   <tr>
     <td align="center" valign="top" width="110"><a href="https://github.com/rebootcrab-blip"><img src="https://github.com/rebootcrab-blip.png" width="50" style="border-radius:50%" /><br /><sub>rebootcrab-blip</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/zhaoxv210"><img src="https://github.com/zhaoxv210.png" width="50" style="border-radius:50%" /><br /><sub>zhaoxv210</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/serenNan"><img src="https://github.com/serenNan.png" width="50" style="border-radius:50%" /><br /><sub>serenNan</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/IatomicreactorI"><img src="https://github.com/IatomicreactorI.png" width="50" style="border-radius:50%" /><br /><sub>IatomicreactorI</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/quantai1314"><img src="https://github.com/quantai1314.png" width="50" style="border-radius:50%" /><br /><sub>quantai1314</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/Git-creat7"><img src="https://github.com/Git-creat7.png" width="50" style="border-radius:50%" /><br /><sub>Git-creat7</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/undownding"><img src="https://github.com/undownding.png" width="50" style="border-radius:50%" /><br /><sub>undownding</sub></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" width="110"><a href="https://github.com/chrono-meta"><img src="https://github.com/chrono-meta.png" width="50" style="border-radius:50%" /><br /><sub>chrono-meta</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/Yike-Ye"><img src="https://github.com/Yike-Ye.png" width="50" style="border-radius:50%" /><br /><sub>Yike-Ye</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/xiaoshidefeng"><img src="https://github.com/xiaoshidefeng.png" width="50" style="border-radius:50%" /><br /><sub>xiaoshidefeng</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/yanguibao1997"><img src="https://github.com/yanguibao1997.png" width="50" style="border-radius:50%" /><br /><sub>yanguibao1997</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/JasonZH6600"><img src="https://github.com/JasonZH6600.png" width="50" style="border-radius:50%" /><br /><sub>JasonZH6600</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/V1staz"><img src="https://github.com/V1staz.png" width="50" style="border-radius:50%" /><br /><sub>V1staz</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/royhuang91"><img src="https://github.com/royhuang91.png" width="50" style="border-radius:50%" /><br /><sub>royhuang91</sub></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" width="110"><a href="https://github.com/Schlaflied"><img src="https://github.com/Schlaflied.png" width="50" style="border-radius:50%" /><br /><sub>Schlaflied</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/KaiC5504"><img src="https://github.com/KaiC5504.png" width="50" style="border-radius:50%" /><br /><sub>KaiC5504</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/jiaxuan1101"><img src="https://github.com/jiaxuan1101.png" width="50" style="border-radius:50%" /><br /><sub>jiaxuan1101</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/kkirito16"><img src="https://github.com/kkirito16.png" width="50" style="border-radius:50%" /><br /><sub>kkirito16</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/200780381"><img src="https://github.com/200780381.png" width="50" style="border-radius:50%" /><br /><sub>200780381</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/Dxy2326"><img src="https://github.com/Dxy2326.png" width="50" style="border-radius:50%" /><br /><sub>Dxy2326</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/lurui1997"><img src="https://github.com/lurui1997.png" width="50" style="border-radius:50%" /><br /><sub>lurui1997</sub></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" width="110"><a href="https://github.com/JesmonX"><img src="https://github.com/JesmonX.png" width="50" style="border-radius:50%" /><br /><sub>JesmonX</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/chen86860"><img src="https://github.com/chen86860.png" width="50" style="border-radius:50%" /><br /><sub>chen86860</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/LinYsssss"><img src="https://github.com/LinYsssss.png" width="50" style="border-radius:50%" /><br /><sub>LinYsssss</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/He-wei-gui"><img src="https://github.com/He-wei-gui.png" width="50" style="border-radius:50%" /><br /><sub>He-wei-gui</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/liugou27"><img src="https://github.com/liugou27.png" width="50" style="border-radius:50%" /><br /><sub>liugou27</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/YOOGOMJA"><img src="https://github.com/YOOGOMJA.png" width="50" style="border-radius:50%" /><br /><sub>YOOGOMJA</sub></a></td>
+    <td align="center" valign="top" width="110"><a href="https://github.com/anupamme"><img src="https://github.com/anupamme.png" width="50" style="border-radius:50%" /><br /><sub>anupamme</sub></a></td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" width="110"><a href="https://github.com/anthonyonazure"><img src="https://github.com/anthonyonazure.png" width="50" style="border-radius:50%" /><br /><sub>anthonyonazure</sub></a></td>
   </tr>
 </table>
 

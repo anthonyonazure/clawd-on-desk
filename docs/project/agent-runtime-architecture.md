@@ -60,11 +60,35 @@ CodeBuddy 状态同步（Claude Code 兼容 hook，command）：
     → 同上状态机（agent_id: codebuddy）
   Hook 注册到 ~/.codebuddy/settings.json，格式与 Claude Code 完全兼容。
 
+自定义 HTTP Agent（动态注册，state-only）：
+  Settings 选择本机可执行文件
+    → customApplications 生成稳定 custom-... ID（只代表注册，不证明应用是 AI，也不安装 hook）
+    → 应用或外部 adapter 读取 ~/.clawd/runtime.json 的当前端口
+    → HTTP POST 127.0.0.1:<runtime-port>/state { agent_id, session_id, state, event }
+    → server-agent-id.js 只接受当前仍注册的 custom ID，enabled gate 决定是否进入状态机
+  v1 不支持 /permission；已注册 custom 的权限请求返回 204 no-decision，删除/伪造的 custom- ID 直接拒绝，不能降级成 Claude Code subagent。
+
+WorkBuddy 状态与通知同步（Claude Code 兼容 hook，command）：
+  WorkBuddy 触发 SessionStart / SessionEnd / UserPromptSubmit / PreToolUse / PostToolUse / Stop / Notification / PreCompact
+    → hooks/workbuddy-hook.js（PascalCase 事件 → agents/workbuddy.js 映射 → HTTP POST）
+    → 同上状态机（agent_id: workbuddy）
+  Hook 注册到当前 WorkBuddy AI 的 ~/.workbuddy-ai/settings.json（旧版兼容 ~/.workbuddy/settings.json）。集成为 state + Notification only：不注册 PermissionRequest HTTP hook，
+  审批始终由 WorkBuddy 原生沙箱与 GUI 处理；无 session_id 的事件在返回合法 stdout 后直接丢弃，不进入 /state。
+
 Kimi Code CLI（Kimi-CLI）状态同步（hook-only，config.toml）：
   Kimi Code CLI（Kimi-CLI）触发事件
     → hooks/kimi-hook.js（hook 事件 → agents/kimi-cli.js 映射 → HTTP POST）
     → 同上状态机（agent_id: kimi-cli）
   Hook 注册到 ~/.kimi/config.toml 的 [[hooks]] 条目；Clawd 启动时会自动同步这些条目。
+
+ZCode 状态同步（hook-only，config.json）：
+  ZCode 触发 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PostToolUseFailure / Stop
+    → hooks/zcode-hook.js（hook 事件 → agents/zcode.js 映射 → HTTP POST）
+    → 同上状态机（agent_id: zcode，session_id 规范化为 zcode:<raw>）
+  Hook 注册到 ~/.zcode/cli/config.json 的 hooks.events.*。Phase 1 仅同步状态，不注册 PermissionRequest；
+  ZCode 原生流程继续处理权限。显式 hooks.enabled=false 或 Clawd 单项 hook enabled=false 是用户选择，
+  启动同步 / Settings Repair 均保留，Doctor 只提示。旧版 zcode-cli 与当前 Electron Node-mode
+  Resources/glm/zcode.cjs 进程均受支持；GUI shell 只有在命令行同时含 zcode.cjs 时才会被认作 runtime。
 
 opencode 状态同步（in-process plugin，~0ms 延迟）：
   opencode 触发事件（session.created / session.status / message.part.updated 等）
@@ -73,6 +97,14 @@ opencode 状态同步（in-process plugin，~0ms 延迟）：
     → session.created 的 event.properties.info.parentID 会被记录为 child → parent 映射，child 状态上报带 headless: true
     → fire-and-forget HTTP POST 127.0.0.1:23333/state
     → 同上状态机（agent_id: opencode）
+
+MiMo Code 状态同步（in-process plugin，~0ms 延迟）：
+  MiMo Code 触发事件（session.created / session.status / message.part.updated 等）
+    → hooks/mimocode-plugin/index.mjs（插件跑在 mimo.exe 进程内，共享 @mimo-ai/plugin SDK）
+    → translateEvent 映射（与 opencode 同源的事件名 → PascalCase Clawd event 名）
+    → session.created 的 event.properties.info.parentID 会被记录为 child → parent 映射，child 状态上报带 headless: true
+    → fire-and-forget HTTP POST 127.0.0.1:23333/state
+    → 同上状态机（agent_id: mimocode）
 
 Pi 状态同步（global extension，state-only）：
   Pi 触发 session_start / before_agent_start / tool_call / tool_result / agent_end 等事件
@@ -102,10 +134,21 @@ opencode 权限气泡（event hook + 反向 bridge，非阻塞）：
     → Clawd POST plugin 的反向 bridge → bridge 用 ctx.client._client.post() 调 opencode 内置 Hono 路由 /permission/:id/reply
     → opencode 执行对应行为（once/always/reject）
 
+MiMo Code 权限气泡（event hook + 反向 bridge，非阻塞，与 opencode 同源协议）：
+  MiMo Code 请求权限 → event hook 收到 permission.asked
+    → plugin POST /permission（带 bridge_url + bridge_token）→ Clawd 立即 200 ACK（不挂连接）
+    → Clawd 创建 bubble 窗口 → 用户 Allow/Always/Deny
+    → Clawd POST plugin 的反向 bridge → bridge 用 ctx.client._client.post() 调 MiMo Code 内置 Hono 路由 /permission/:id/reply
+    → MiMo Code 执行对应行为（once/always/reject）
+
 远程 SSH 状态同步（反向端口转发）：
   远程服务器上的 Claude Code / Codex CLI
-    → hooks 通过 SSH 隧道 POST 到本地 127.0.0.1:23333
-    → 同上状态机（CLAWD_REMOTE=1 模式跳过 PID 收集）
+    → secure hooks 只 POST 到 profile pin 住的远端转发端口
+    → SSH 隧道落到该 profile 的临时本地 ingress
+    → ingress 校验 routing nonce 并写入 profileId canonical namespace
+    → 同上状态机（CLAWD_REMOTE=1 + CLAWD_SSH_REMOTE=1，跳过远端 PID 聚焦）
+  secure identity 缺失/损坏时 fail closed，不回退 23333-23337 扫描；
+  通用本地 /state 与 /permission 不作为 SSH 隧道目标
 
 权限决策流（Claude Code HTTP hook，阻塞）：
   Claude Code PermissionRequest
@@ -136,37 +179,63 @@ opencode 权限气泡（event hook + 反向 bridge，非阻塞）：
 - `agents/gemini-cli.js` — Gemini CLI hook 事件映射
 - `agents/antigravity-cli.js` — Antigravity CLI (agy) hook 事件映射（state-only，无权限气泡）
 - `agents/kimi-cli.js` — Kimi Code CLI（Kimi-CLI）hook 事件映射 + permission 分类策略
+- `agents/zcode.js` — ZCode config-file hook 事件映射（state-only，无权限气泡）
 - `agents/kiro-cli.js` — Kiro CLI 事件映射（camelCase），无 HTTP hook / 无权限 / 无 subagent
 - `agents/codebuddy.js` — CodeBuddy 事件映射（PascalCase，Claude Code 兼容），支持权限
+- `agents/workbuddy.js` — WorkBuddy 事件映射（PascalCase，Claude Code 兼容），state + Notification only，无 Clawd 权限审批
 - `agents/opencode.js` — opencode 事件映射 + 能力（plugin、permission、terminal focus）
+- `agents/mimocode.js` — MiMo Code 事件映射 + 能力（plugin、permission、terminal focus），与 opencode 同源
 - `agents/pi.js` — Pi extension 事件映射 + 能力（extension，state-only，不接管 permission）
 - `agents/openclaw.js` — OpenClaw plugin 事件映射 + 能力（state-only，本地终端聚焦暂不支持）
 - `agents/hermes.js` — Hermes Agent plugin 事件映射 + 能力（session、SessionEnd、terminal focus；无 permission/subagent）
 - `agents/registry.js` — agent 注册表：按 ID 或进程名查找 agent 配置
-- `agents/codex-log-monitor.js` — Codex JSONL fallback 增量轮询器（文件监视 + 增量读取 + approval heuristic）
+- `agents/codex-log-monitor.js` — Codex JSONL fallback 增量轮询器（文件监视 + 增量读取 + 状态 / metadata fallback，不再做审批猜测）
 - `agents/gemini-log-monitor.js` — legacy Gemini session JSON 轮询器；当前 hook-only 路径不启动
 
 运行时的 agent 安装意图 / 启停 / 权限气泡开关通过 `src/agent-gate.js` 读 `prefs.agents[id].integrationInstalled` / `.enabled` / `.permissionsEnabled`。`enabled` 仍然只表示是否处理该 agent 的事件：关闭会让 `state.js` / `server.js` 停止处理事件、清理 session / bubble；`integrationInstalled` 才表示本机 hook/plugin/extension 是否由 Clawd 维护。snapshot 缺字段时 gate 保守默认 true 以兼容旧版；新安装的 schema 会显式把 Claude Code / Codex 设为已安装且启用，其余 agent 设为未安装且未启用。Claude Code 额外有 `.subagentPermissionsEnabled` 子开关（#451，仅 claude-code 默认条目携带该 flag），控制 Task 子 agent 发起的 PermissionRequest 是否弹泡泡。
+
+动态 custom Agent 是上述安装模型的明确例外：`customApplications` 是注册真相，validate post-pass 保证每个已注册 ID 都有 gate entry，且始终显式写 `integrationInstalled=false`、`permissionsEnabled=false`。它不会进入 integration sync map；`enabled` 只控制 `/state` ingress。删除注册项会同步清 session、权限残留和该 ID 的 recent-event ring，并删除 stale custom gate；未知的非-custom agent entry 仍保留向前兼容。
+
+`server-hook-events.js` 的 recent-event ring 按已解析 agent ID 分桶，Settings 的“本次运行活动”和 Doctor connection test 共用这份进程内数据。非法 `custom-` identity 一律写入固定 `rejected-custom` 桶，原始 ID 最多保留 80 字符作为诊断字段，不能让随机 ID 制造无界 Map key。ring 不写 prefs，重启即清空。
 
 ## Hook And Plugin Sync
 
 启动链路只会自动补齐 `integrationInstalled=true` 且 `enabled=true` 的缺失集成：
 
-- `server.js` 启动后异步同步已安装且已启用的 Claude / Codex / Gemini / Antigravity / Cursor / CodeBuddy / Kiro / Kimi / Qwen / Qoder hooks、opencode / OpenClaw / Hermes plugins 和 Pi extension；Hermes 同步会先做无副作用安装探测，未安装时不创建 `~/.hermes`
+- `server.js` 启动后异步同步已安装且已启用的 Claude / Codex / Copilot / Gemini / Antigravity / Cursor / CodeBuddy / WorkBuddy / Kiro / Kimi / Qwen / ZCode / CodeWhale / Qoder / QoderWork / Reasonix hooks、opencode / MiMo Code / OpenClaw / Hermes plugins 和 Pi extension；Hermes 同步会先做无副作用安装探测，未安装时不创建 `~/.hermes`
 - Claude hook 同步时还会扫 `DEPRECATED_CORE_HOOKS`（当前含 `WorktreeCreate`）清掉旧版本留下的过时 clawd hook 条目，仅删 command 指向 `clawd-hook.js` 的那条，用户自己写的同事件 hook 不动
 
 Settings Agent 页的 Install 会执行对应 sync 并把 `integrationInstalled=true, enabled=true` 一起提交；Uninstall 会调用 marker-scoped 卸载器，并把 `integrationInstalled=false, enabled=false` 一起提交。单独重新启用一个未安装 agent 只打开事件入口，不会写本机配置；手动安装命令主要用于调试、重装或远程机部署。
 
+CodeBuddy 的 PermissionRequest HTTP 所有权只认严格的本机 managed URL，或版本化 marker `clawd-on-desk.permission.v1`。旧 `name:"clawd"` 只有在 URL 同时属于 managed local endpoint 时才会迁移；同名第三方/custom URL 注册和卸载均不触碰。进程内 startup、Settings install/clear/repair 显式传 `{mode:"local"}` 或 `{mode:"custom",url}`；裸 CLI 与 WSL deploy 用 `{mode:"preserve"}`，防止把 marker-owned custom URL 意外改回 localhost。
+
+### Claude hook 健康巡检与自愈（#657）
+
+`src/claude-settings-watcher.js` 除了原有的目录 watcher（盯 `~/.claude/` 目录、debounce 1 秒）外，还跑一个自调度的低频只读健康巡检：
+
+- 默认周期 5 分钟，不依赖任何 settings.json fs 事件——hook 脚本在其他目录（如系统 Temp）被删除也能发现，watcher 和周期巡检共用同一个 `runHealthCheck(reason)` 决策函数。
+- 判断逻辑收敛在 `src/claude-hook-health.js` 的 `inspectClaudeHookHealth()`：解析 command、校验 nodeBin/scriptPath、比对当前权威路径（`hooks/install.js` 的 `getClaudeHookScriptPath()` / `getClaudeAutoStartScriptPath()` / `CLAUDE_CORE_HOOK_EVENTS`），复用 Doctor 的 `agent-node-bin-parser.js` 解析器，不另起一套正则。
+- 可自动修复的问题（`buildClaudeRepairSignature()` 判定）经 `src/claude-hook-operations.js` 的实例级队列串行 repair，repair 后重新读盘用同一 inspector 复验，不只信 installer 的 `updated>0`。
+- 同一 repair signature 连续 3 次修复+复验失败后进入 `manual-fix-required`，停止自动 mutation，只保留 5 分钟只读复查；健康恢复或 repair class 集合实际变化时清计数。
+- `settings.json` suspicious-shrink 期间只弹一次 `notifySuspiciousShrink`，不会每个周期重复通知。
+- 当前安装包的 hook 源脚本（`getClaudeHookScriptPath()`）本身不存在时，不会尝试任何 reconcile（写了也没用），状态设为 `source-script-missing`，Doctor 提示重装/重新解压而不是提供配置 Repair。
+- 巡检严格受 `manageClaudeHooksAutomatically`、`claude-code.integrationInstalled`、`claude-code.enabled` 三个 gate 保护，和目录 watcher 共用同一套 gate。
+- 所有 mutation 入口（启动 reconcile、watcher 自动恢复、周期自愈、Settings Agent Install/Enable、Doctor Fix、`autoStartWithClaude` 开关、Settings Agent Uninstall、legacy hooks Install/Uninstall、About 页 `cleanupIntegrations`）都经过 `src/server.js` 持有的同一个 `claude-hook-operations.js` 队列实例，串行执行、互不覆盖；statusline 注册/卸载只在 startup、Settings Agent Install/Enable、Settings Agent Uninstall、About cleanup 这几个来源触发，周期巡检和 Doctor Fix 不碰 statusline。
+- 历史 key `claudeQuotaCollectionEnabled` 现在是本机 Claude statusline metadata（context window + 可用 quota）的唯一用户授权。关闭或卸载时，server 先用进程内 suppression 挡住未结尾包，再 ownership-safe 卸载并清除 `profileId="local"`（含 WSL）会话的 statusline 分母所有权，同时从 account-quota store 定向删除所有非 `remote:` 来源的 `claudeQuota` 并立即广播、持久化；同源 Codex / Antigravity provider 与 Remote SSH quota 保留。关闭态启动也会执行同一缓存迁移。statusline 上报拥有 limit，普通 transcript hook 仍可更新 used，并按保留的权威 limit 重算 percent。
+- `server.getClaudeHookHealthStatus()` 暴露供 Doctor 使用的只读状态（`healthy` / `repairing` / `degraded` / `manual-fix-required` / `guarded` / `stopped`），与既有的 `getClaudeHookGuardStatus()`（仅覆盖 suspicious-shrink 一种通知）并存，互不替代。
+
 ## Permission Bubble
 
 - Claude Code / CodeBuddy 的 PermissionRequest 用 HTTP hook（阻塞式），其他事件用 command hook（非阻塞式）
+- 动态 custom HTTP Agent v1 是 state-only：`/permission` 恒不返回 Allow/Deny，也不创建权限 bubble
+- WorkBuddy 不进入 `/permission`：权限请求只以 Notification 驱动提醒，Allow / Deny 决策留在 WorkBuddy 原生 GUI
 - Codex 的 PermissionRequest 是 official command hook；hook 脚本挂起等待 `/permission`，再把 sanitized allow/deny JSON 写到 stdout
 - `POST /permission` 接收 `{ tool_name, tool_input, session_id, permission_suggestions }`；Codex 额外带 `turn_id`、`tool_input_description`、`tool_input_fingerprint`
 - 每个权限请求都会创建独立 `BrowserWindow`，多个 bubble 从右下向上堆叠
 - bubble 会通过 IPC `bubble-height` 回报真实高度，主进程据此重排
 - 支持 Allow / Deny / suggestion 决策，以及 `addRules` / `setMode` suggestion 类型
-- DND 只负责“不弹 bubble”，不替用户决定权限：opencode 分支 silent drop，让 TUI 内置权限提示接管；Claude Code 分支 `res.destroy()`，让 CC 回到内置聊天/终端确认；Codex 分支返回 no-decision `{}`，让 Codex 原生审批接管
-- Codex JSONL approval 通知 bubble 只保留给 official hook 不可用的 fallback session；hook-active session 的旧 passive notify 会被 main.js wrapper 压掉
+- DND 只负责“不弹 bubble”，不替用户决定权限：opencode 与 MiMo Code 分支 silent drop，让 TUI 内置权限提示接管；Claude Code 分支 `res.destroy()`，让 CC 回到内置聊天/终端确认；Codex 分支返回 no-decision `{}`，让 Codex 原生审批接管
+- Codex 审批只认 official `PermissionRequest` hook；JSONL fallback 不再根据 shell function_call 猜测审批，也不再创建 Codex passive approval notify bubble
 - 涉及 Claude Code 权限 payload 的改动（`permission_suggestions`、`updatedPermissions`、elicitation 输入等）必须至少用一次真实 Claude Code 验证；`curl` 自编请求历史上掩盖过字段结构 bug
 
 ### Codex official hook notes
@@ -183,12 +252,12 @@ P0 spike（2026-04-26，Windows native Codex CLI）采到的实际 payload 边�
 
 ## Plugin Notes
 
-opencode、OpenClaw 和 Hermes 是 plugin 形式集成的 agent；OpenClaw Phase 1 只上报状态，其他 agent 主要是 hook 脚本。
+opencode、MiMo Code、OpenClaw 和 Hermes 是 plugin 形式集成的 agent；OpenClaw Phase 1 只上报状态，其他 agent 主要是 hook 脚本。
 
 - 进程树 walk 从 `process.pid` 起步，不是 `ppid`
 - `task` 工具会直接新建 session，而不是产出 subtask part；只有 `session.created` 明确带 `event.properties.info.parentID` 的 session 才会被视为 child
-- opencode child session 作为 root 拥有的后台 headless 工作处理：不参与 HUD / focus / 多会话 fanout，`session.idle` 会降级为 `sleeping/SessionEnd`，root session 的 `session.idle` 才映射 `attention/Stop`
-- 由于 `permission.ask` hook 在 opencode 1.3.13 上未被调用，权限只能走 event hook + 反向 bridge
+- opencode child session 作为 root 拥有的后台 headless 工作处理：不参与 HUD / focus / 多会话 fanout，`session.idle` 会降级为 `sleeping/SessionEnd`，root session 的 `session.idle` 才映射 `attention/Stop`；MiMo Code 与 opencode 同源，child session 行为一致
+- 由于 `permission.ask` hook 在 opencode 1.3.13 上未被调用，权限只能走 event hook + 反向 bridge；MiMo Code 同源，权限同样走 event hook + 反向 bridge
 - plugin 内发出的 POST 必须 fire-and-forget，避免拖慢 TUI
 - 打包后需要把 `app.asar/` 重写为 `app.asar.unpacked/`
 - Hermes plugin 使用同步 POST，避免短命 `hermes -z` 进程退出前丢事件；Clawd 未启动时有短 cooldown，避免反复扫端口
@@ -224,7 +293,12 @@ opencode、OpenClaw 和 Hermes 是 plugin 形式集成的 agent；OpenClaw Phase
 - 不要用 `process.ppid` 做轻量替代：Claude Code / hook 进程链里它通常只是临时 shell PID，不稳定也不可持久化
 - `source_pid` 跟随状态更新送到 `main.js`，用于 Sessions 菜单聚焦
 - 右键 Sessions 子菜单点击后，`focusTerminalWindow()` 会用 PowerShell（Windows）或 `osascript`（macOS）聚焦终端
-- 远程场景通过 `scripts/remote-deploy.sh` + SSH 反向端口转发，把远端 hook 事件回送到本地 Clawd
+- 远程场景只通过 Settings Remote SSH controller 部署：`runtimeKey → layout` 解析、
+  installId/profileId/nonce 身份、原子 lease/fencing、持久部署事务和 profile 专属 ingress
+  共同把远端 hook 事件回送到本地 Clawd；`scripts/remote-deploy.sh` 已 fail-fast 停用
+- `account-default` 用于不同 Unix 账号；同 Unix 账号默认冲突阻止。实验
+  `profile-isolated` 仅在显式验证开关下出现，分开 Claude/Codex/Copilot 用户级
+  config/session/runtime roots 与 wrapper，不虚拟化整个 HOME，也不是同 UID 安全边界
 
 ## Context Menu Owner Window
 

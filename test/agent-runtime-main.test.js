@@ -6,8 +6,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const createAgentRuntimeMain = require("../src/agent-runtime-main");
+const CodexSubagentClassifier = require("../agents/codex-subagent-classifier");
+const { resolveCodexOfficialHookState } = require("../src/server-codex-official-turns");
+const { makeSessionKey } = require("../src/session-key");
 
 const SRC_DIR = path.join(__dirname, "..", "src");
+const localSessionKey = (rawSessionId) => makeSessionKey({
+  profileId: "local",
+  rawSessionId,
+});
 
 function makeFakeMonitorClass(instances) {
   return class FakeCodexLogMonitor {
@@ -70,10 +77,6 @@ describe("agent-runtime-main", () => {
       true
     );
     assert.equal(
-      runtime.shouldSuppressCodexLogEvent("codex-1", "codex-permission", "response_item:function_call"),
-      true
-    );
-    assert.equal(
       runtime.shouldSuppressCodexLogEvent("codex-1", "working", "event_msg:context_compacted"),
       false
     );
@@ -101,7 +104,7 @@ describe("agent-runtime-main", () => {
     });
     const monitor = runtime.startCodexLogMonitor();
 
-    runtime.updateSessionFromServer("codex:abc", "working", "UserPromptSubmit", {
+    runtime.updateSessionFromServer(localSessionKey("codex:abc"), "working", "UserPromptSubmit", {
       agentId: "codex",
       hookSource: "codex-official",
     });
@@ -117,11 +120,11 @@ describe("agent-runtime-main", () => {
     });
 
     assert.deepStrictEqual(calls, [
-      ["update", "codex:abc", "working", "UserPromptSubmit", {
+      ["update", localSessionKey("codex:abc"), "working", "UserPromptSubmit", {
         agentId: "codex",
         hookSource: "codex-official",
       }],
-      ["update", "codex:abc", "idle", "event_msg:task_complete", {
+      ["update", localSessionKey("codex:abc"), "idle", "event_msg:task_complete", {
         cwd: "D:\\repo",
         agentId: "codex",
         sessionTitle: undefined,
@@ -132,8 +135,55 @@ describe("agent-runtime-main", () => {
           source: "codex",
         },
         headless: false,
+        profileId: "local",
+        rawSessionId: "codex:abc",
         preserveState: true,
       }],
+    ]);
+  });
+
+  it("routes Codex user-input monitor callbacks to a passive card and transient state", () => {
+    const instances = [];
+    const calls = [];
+    const FakeMonitor = makeFakeMonitorClass(instances);
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => FakeMonitor,
+      loadCodexAgent: () => ({ id: "codex" }),
+      isAgentEnabled: () => true,
+      codexSubagentClassifier: {},
+      updateSession: (...args) => calls.push(["update", ...args]),
+      showCodexUserInputBubble: (input) => { calls.push(["show", input]); return true; },
+      clearCodexUserInputBubbles: (...args) => calls.push(["clear", ...args]),
+    });
+    const monitor = runtime.startCodexLogMonitor();
+    const request = {
+      callId: "call_1",
+      questions: [{ id: "q", header: "Choice", question: "Pick one", options: [] }],
+      autoResolutionMs: null,
+    };
+    const extra = { cwd: "/repo", sourcePid: 42, agentPid: 42, headless: false };
+
+    monitor.options.onUserInputRequest("codex:s1", request, extra);
+    monitor.options.onUserInputResolved("codex:s1", "call_1");
+
+    assert.deepStrictEqual(calls[0], ["show", {
+      sessionId: localSessionKey("codex:s1"),
+      callId: "call_1",
+      questions: request.questions,
+      autoResolutionMs: null,
+      ...extra,
+    }]);
+    assert.strictEqual(calls[1][0], "update");
+    assert.strictEqual(calls[1][2], "notification");
+    assert.strictEqual(calls[1][3], "CodexUserInputRequest");
+    assert.strictEqual(calls[1][4].profileId, "local");
+    assert.strictEqual(calls[1][4].rawSessionId, "codex:s1");
+    assert.strictEqual(calls[1][4].transientPermissionEvent, true);
+    assert.deepStrictEqual(calls[2], [
+      "clear",
+      localSessionKey("codex:s1"),
+      "call_1",
+      "codex-user-input-resolved",
     ]);
   });
 
@@ -162,7 +212,7 @@ describe("agent-runtime-main", () => {
     });
 
     assert.deepStrictEqual(calls, [
-      ["update", "codex:abc", "working", "event_msg:token_count", {
+      ["update", localSessionKey("codex:abc"), "working", "event_msg:token_count", {
         cwd: "D:\\repo",
         agentId: "codex",
         sessionTitle: undefined,
@@ -173,8 +223,59 @@ describe("agent-runtime-main", () => {
           source: "codex",
         },
         headless: false,
+        profileId: "local",
+        rawSessionId: "codex:abc",
         preserveState: true,
       }],
+    ]);
+  });
+
+  it("routes JSONL generic and Spark quota to the account store, never updateSession opts", () => {
+    const instances = [];
+    const calls = [];
+    const quotaCalls = [];
+    const FakeMonitor = makeFakeMonitorClass(instances);
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => FakeMonitor,
+      loadCodexAgent: () => ({ id: "codex" }),
+      isAgentEnabled: (agentId) => agentId === "codex",
+      updateSession: (...args) => calls.push(["update", ...args]),
+      clearCodexNotifyBubbles: (...args) => calls.push(["clear", ...args]),
+      getStateRuntime: () => ({
+        updateAccountQuota: (...args) => quotaCalls.push(args),
+      }),
+      codexSubagentClassifier: {},
+    });
+    const monitor = runtime.startCodexLogMonitor();
+
+    const codexQuota = {
+      codexFiveHour: { usedPercent: 1, resetAt: 1783669570000 },
+      codexWeekly: { usedPercent: 43, resetAt: 1784256370000 },
+    };
+    const codexSparkQuota = {
+      codexWeekly: { usedPercent: 7, resetAt: 1784256370000 },
+    };
+    monitor.emit("codex:abc", "working", "event_msg:token_count", {
+      cwd: "D:\\repo",
+      contextUsage: { used: 23959, limit: 258400, percent: 9, source: "codex" },
+      codexQuota,
+      codexSparkQuota,
+    });
+    // Quota-only refresh (no contextUsage): must not enter the updateSession
+    // lifecycle machine at all, only feed the store.
+    monitor.emit("codex:abc", "working", "event_msg:token_count", { codexSparkQuota });
+
+    // updateSession must never see account quota in its opts.
+    for (const call of calls) {
+      if (call[0] !== "update") continue;
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(call[4], "codexQuota"), false);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(call[4], "codexSparkQuota"), false);
+    }
+    assert.strictEqual(calls.filter((c) => c[0] === "update").length, 1);
+    // Local monitor reports as the local source (null host).
+    assert.deepStrictEqual(quotaCalls, [
+      [null, { codexQuota, codexSparkQuota }],
+      [null, { codexSparkQuota }],
     ]);
   });
 
@@ -218,7 +319,7 @@ describe("agent-runtime-main", () => {
     }]]);
   });
 
-  it("maps Codex JSONL monitor permission and state callbacks through the main runtime effects", () => {
+  it("maps Codex JSONL monitor state callbacks through the main runtime effects", () => {
     const instances = [];
     const calls = [];
     const classifier = { classify: () => null };
@@ -229,7 +330,6 @@ describe("agent-runtime-main", () => {
       codexSubagentClassifier: classifier,
       isAgentEnabled: (agentId) => agentId === "codex",
       updateSession: (...args) => calls.push(["update", ...args]),
-      showCodexNotifyBubble: (...args) => calls.push(["notify", ...args]),
       clearCodexNotifyBubbles: (...args) => calls.push(["clear", ...args]),
     });
 
@@ -238,14 +338,8 @@ describe("agent-runtime-main", () => {
     assert.equal(monitor, instances[0]);
     assert.equal(monitor.started, 1);
     assert.deepStrictEqual(monitor.agent, { id: "codex" });
-    assert.equal(monitor.options.classifier, classifier);
+    assert.notEqual(monitor.options.classifier, classifier);
 
-    monitor.emit("sid", "codex-permission", "event_msg:exec_command_end", {
-      cwd: "D:\\repo",
-      sessionTitle: "Run tests",
-      headless: true,
-      permissionDetail: { command: "npm test" },
-    });
     monitor.emit("sid", "working", "response_item:web_search_call", {
       cwd: "D:\\repo",
       sessionTitle: "Run tests",
@@ -253,20 +347,52 @@ describe("agent-runtime-main", () => {
     });
 
     assert.deepStrictEqual(calls, [
-      ["update", "sid", "notification", "event_msg:exec_command_end", {
-        cwd: "D:\\repo",
-        agentId: "codex",
-        sessionTitle: "Run tests",
-      }],
-      ["notify", { sessionId: "sid", command: "npm test" }],
-      ["clear", "sid", "codex-state-transition:working"],
-      ["update", "sid", "working", "response_item:web_search_call", {
+      ["clear", localSessionKey("sid"), "codex-state-transition:working"],
+      ["update", localSessionKey("sid"), "working", "response_item:web_search_call", {
         cwd: "D:\\repo",
         agentId: "codex",
         sessionTitle: "Run tests",
         headless: true,
+        profileId: "local",
+        rawSessionId: "sid",
       }],
     ]);
+  });
+
+  it("shares canonical classifier identity from local JSONL to official hooks without leaking to remote profiles", () => {
+    const instances = [];
+    const classifier = new CodexSubagentClassifier();
+    const FakeMonitor = makeFakeMonitorClass(instances);
+    const runtime = createAgentRuntimeMain({
+      loadCodexLogMonitor: () => FakeMonitor,
+      loadCodexAgent: () => ({ id: "codex" }),
+      codexSubagentClassifier: classifier,
+      isAgentEnabled: () => false,
+    });
+    const monitor = runtime.startCodexLogMonitor();
+    const rawSessionId = "codex:shared";
+    const localId = localSessionKey(rawSessionId);
+    const remoteId = makeSessionKey({ profileId: "profile-a", rawSessionId });
+
+    assert.strictEqual(monitor.options.classifier.registerSession(rawSessionId, {
+      sessionMeta: { source: { subagent: { thread_spawn: { agent_role: "explorer" } } } },
+    }), "subagent");
+    assert.strictEqual(classifier.classify(localId), "subagent");
+
+    const payload = {
+      agent_id: "codex",
+      hook_source: "codex-official",
+      event: "Stop",
+      session_id: rawSessionId,
+    };
+    assert.deepStrictEqual(
+      resolveCodexOfficialHookState(payload, "idle", new Map(), classifier, localId),
+      { state: "idle", drop: false, headless: true }
+    );
+    assert.deepStrictEqual(
+      resolveCodexOfficialHookState(payload, "idle", new Map(), classifier, remoteId),
+      { state: "idle", drop: false }
+    );
   });
 
   it("starts and stops the Codex monitor through agent gate hooks and cleanup", () => {
@@ -380,27 +506,27 @@ describe("agent-runtime-main", () => {
 
     // Official hooks were active this turn, but the official Stop never arrived,
     // so the session is still shown as working-like.
-    runtime.markCodexOfficialHookSession("codex:s1");
-    sessions.set("codex:s1", { agentId: "codex", state: "working" });
+    runtime.markCodexOfficialHookSession(localSessionKey("codex:s1"));
+    sessions.set(localSessionKey("codex:s1"), { agentId: "codex", state: "working" });
 
     // task_complete from JSONL is allowed through to close the turn (attention
     // when the turn used tools, idle when it did not).
     assert.equal(
-      runtime.shouldSuppressCodexLogEvent("codex:s1", "attention", "event_msg:task_complete"),
+      runtime.shouldSuppressCodexLogEvent(localSessionKey("codex:s1"), "attention", "event_msg:task_complete"),
       false
     );
     assert.equal(
-      runtime.shouldSuppressCodexLogEvent("codex:s1", "idle", "event_msg:task_complete"),
+      runtime.shouldSuppressCodexLogEvent(localSessionKey("codex:s1"), "idle", "event_msg:task_complete"),
       false
     );
 
     // Every other covered JSONL event stays suppressed under recent official hooks.
     assert.equal(
-      runtime.shouldSuppressCodexLogEvent("codex:s1", "working", "event_msg:task_started"),
+      runtime.shouldSuppressCodexLogEvent(localSessionKey("codex:s1"), "working", "event_msg:task_started"),
       true
     );
     assert.equal(
-      runtime.shouldSuppressCodexLogEvent("codex:s1", "attention", "event_msg:exec_command_end"),
+      runtime.shouldSuppressCodexLogEvent(localSessionKey("codex:s1"), "attention", "event_msg:exec_command_end"),
       true
     );
   });
@@ -432,7 +558,7 @@ describe("agent-runtime-main", () => {
     runtime.markCodexOfficialHookSession("codex:s1");
 
     // Official Stop already closed the turn → no longer working-like.
-    sessions.set("codex:s1", { agentId: "codex", state: "idle" });
+    sessions.set(localSessionKey("codex:s1"), { agentId: "codex", state: "idle" });
     assert.equal(
       runtime.shouldSuppressCodexLogEvent("codex:s1", "attention", "event_msg:task_complete"),
       true
@@ -510,7 +636,6 @@ describe("agent-runtime-main", () => {
       isAgentEnabled: (agentId) => agentId === "codex",
       getStateRuntime: () => ({ sessions }),
       updateSession: (...args) => calls.push(["update", ...args]),
-      showCodexNotifyBubble: (...args) => calls.push(["notify", ...args]),
       clearCodexNotifyBubbles: (...args) => calls.push(["clear", ...args]),
     });
 
@@ -518,8 +643,8 @@ describe("agent-runtime-main", () => {
 
     // Recent official hook activity + a still-working local Codex session whose
     // official Stop never arrived.
-    runtime.markCodexOfficialHookSession("codex:s1");
-    sessions.set("codex:s1", { agentId: "codex", state: "working" });
+    runtime.markCodexOfficialHookSession(localSessionKey("codex:s1"));
+    sessions.set(localSessionKey("codex:s1"), { agentId: "codex", state: "working" });
 
     monitor.emit("codex:s1", "idle", "event_msg:task_complete", {
       cwd: "D:\\repo",
@@ -527,19 +652,21 @@ describe("agent-runtime-main", () => {
     });
 
     assert.deepStrictEqual(calls, [
-      ["clear", "codex:s1", "codex-state-transition:idle"],
-      ["update", "codex:s1", "idle", "event_msg:task_complete", {
+      ["clear", localSessionKey("codex:s1"), "codex-state-transition:idle"],
+      ["update", localSessionKey("codex:s1"), "idle", "event_msg:task_complete", {
         cwd: "D:\\repo",
         agentId: "codex",
         sessionTitle: "Codex turn",
         headless: false,
+        profileId: "local",
+        rawSessionId: "codex:s1",
       }],
     ]);
 
     // The fallback idled the turn; a duplicate JSONL task_complete is now dropped
     // so there is no double done/celebration.
     calls.length = 0;
-    sessions.set("codex:s1", { agentId: "codex", state: "idle" });
+    sessions.set(localSessionKey("codex:s1"), { agentId: "codex", state: "idle" });
     monitor.emit("codex:s1", "idle", "event_msg:task_complete", {
       cwd: "D:\\repo",
       sessionTitle: "Codex turn",

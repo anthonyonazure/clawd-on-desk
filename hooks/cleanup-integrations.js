@@ -4,23 +4,27 @@
 const os = require("os");
 const path = require("path");
 
-const { unregisterHooks: unregisterClaudeHooks } = require("./install");
+const { unregisterHooks: unregisterClaudeHooks, unregisterClaudeStatusline } = require("./install");
 const { unregisterGeminiHooks } = require("./gemini-install");
-const { unregisterAntigravityHooks } = require("./antigravity-install");
+const { unregisterAntigravityHooks, unregisterAntigravityStatusline } = require("./antigravity-install");
 const { unregisterCursorHooks } = require("./cursor-install");
 const { unregisterCopilotHooks } = require("./copilot-install");
 const { unregisterCodeBuddyHooks } = require("./codebuddy-install");
 const { unregisterKiroHooks } = require("./kiro-install");
 const { unregisterKimiHooks } = require("./kimi-install");
 const { unregisterQwenCodeHooks } = require("./qwen-code-install");
+const { unregisterZcodeHooks } = require("./zcode-install");
 const { unregisterCodewhaleHooks } = require("./codewhale-install");
 const { unregisterCodexCommandHooks } = require("./codex-install-utils");
 const { unregisterOpencodePlugin } = require("./opencode-install");
+const { unregisterMimocodePlugin } = require("./mimocode-install");
 const { unregisterPiExtension } = require("./pi-install");
 const { unregisterOpenClawPlugin } = require("./openclaw-install");
 const { resolveHermesHome, unregisterHermesPlugin } = require("./hermes-install");
 const { unregisterQoderHooks } = require("./qoder-install");
-const { unregisterReasonixHooks } = require("./reasonix-install");
+const { resolveReasonixConfigTargets, unregisterReasonixHooks } = require("./reasonix-install");
+const { unregisterQoderWorkHooks } = require("./qoderwork-install");
+const { unregisterWorkBuddyHooks } = require("./workbuddy-install");
 
 const CODEX_MARKERS = ["codex-hook.js", "codex-debug-hook.js"];
 
@@ -34,14 +38,18 @@ const MANAGED_AGENT_IDS = Object.freeze([
   "kiro-cli",
   "kimi-cli",
   "qwen-code",
+  "zcode",
   "codewhale",
   "codex",
   "opencode",
+  "mimocode",
   "pi",
   "openclaw",
   "hermes",
   "qoder",
   "reasonix",
+  "qoderwork",
+  "workbuddy",
 ]);
 
 const AGENT_DISPLAY_NAMES = Object.freeze({
@@ -51,17 +59,21 @@ const AGENT_DISPLAY_NAMES = Object.freeze({
   "cursor-agent": "Cursor Agent",
   "copilot-cli": "GitHub Copilot CLI",
   codebuddy: "CodeBuddy",
+  workbuddy: "WorkBuddy",
   "kiro-cli": "Kiro CLI",
-  "kimi-cli": "Kimi Code CLI",
+  "kimi-cli": "Kimi Code",
   "qwen-code": "Qwen Code",
+  zcode: "ZCode",
   codewhale: "CodeWhale",
   codex: "Codex CLI",
   opencode: "opencode",
+  mimocode: "MiMo Code",
   pi: "Pi",
   openclaw: "OpenClaw",
   hermes: "Hermes Agent",
   qoder: "Qoder",
   reasonix: "Reasonix",
+  qoderwork: "QoderWork",
 });
 
 function normalizeHomeDir(value) {
@@ -77,6 +89,11 @@ function buildTargetEnv(homeDir, options = {}) {
     env.HERMES_HOME = path.resolve(options.hermesHome);
   } else if (options.ignoreInheritedHermesHome) {
     delete env.HERMES_HOME;
+  }
+  if (typeof options.reasonixHome === "string" && options.reasonixHome.trim()) {
+    env.REASONIX_HOME = path.resolve(options.reasonixHome);
+  } else if (options.ignoreInheritedReasonixHome) {
+    delete env.REASONIX_HOME;
   }
   if ((options.platform || process.platform) === "win32") {
     env.LOCALAPPDATA = options.localAppData || path.join(homeDir, "AppData", "Local");
@@ -101,6 +118,7 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
   const env = buildTargetEnv(homeDir, {
     ...options,
     ignoreInheritedHermesHome: explicitHomeDir && !options.hermesHome,
+    ignoreInheritedReasonixHome: explicitHomeDir && !options.reasonixHome,
   });
   const backup = options.backup !== false;
   const silent = options.silent !== false;
@@ -131,6 +149,7 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       "antigravity-cli": {
         ...common,
         configPath: path.join(homeDir, ".gemini", "config", "hooks.json"),
+        settingsPath: path.join(homeDir, ".gemini", "antigravity-cli", "settings.json"),
       },
       "cursor-agent": {
         ...common,
@@ -152,11 +171,19 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       },
       "kimi-cli": {
         ...common,
-        settingsPath: path.join(homeDir, ".kimi", "config.toml"),
+        // #563: clean both generations — legacy Kimi CLI and Kimi Code.
+        settingsPaths: [
+          path.join(homeDir, ".kimi", "config.toml"),
+          path.join(homeDir, ".kimi-code", "config.toml"),
+        ],
       },
       "qwen-code": {
         ...common,
         settingsPath: path.join(homeDir, ".qwen", "settings.json"),
+      },
+      zcode: {
+        ...common,
+        settingsPath: path.join(homeDir, ".zcode", "cli", "config.json"),
       },
       codewhale: {
         ...common,
@@ -171,6 +198,10 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       opencode: {
         ...common,
         configPath: path.join(homeDir, ".config", "opencode", "opencode.json"),
+      },
+      mimocode: {
+        ...common,
+        configPath: path.join(homeDir, ".config", "mimocode", "mimocode.jsonc"),
       },
       pi: {
         ...common,
@@ -196,30 +227,73 @@ function buildCleanupOptionsForHome(homeDirInput, options = {}) {
       },
       reasonix: {
         ...common,
-        settingsPath: path.join(homeDir, ".reasonix", "settings.json"),
+        settingsPaths: resolveReasonixConfigTargets({
+          env,
+          platform: options.platform || process.platform,
+          userHomeDir: homeDir,
+        }).map((target) => target.configPath),
+      },
+      qoderwork: {
+        ...common,
+        settingsPath: path.join(homeDir, ".qoderwork", "settings.json"),
+      },
+      workbuddy: {
+        ...common,
+        settingsPaths: [
+          path.join(homeDir, ".workbuddy-ai", "settings.json"),
+          path.join(homeDir, ".workbuddy", "settings.json"),
+        ],
       },
     },
   };
 }
 
+function unregisterAntigravityIntegration(options = {}) {
+  const hooks = unregisterAntigravityHooks(options);
+  const statusline = unregisterAntigravityStatusline(options);
+  return {
+    removed: removedCountFromResult(hooks) + removedCountFromResult(statusline),
+    changed: changedFromResult(hooks) || changedFromResult(statusline),
+    backupPaths: [...backupPathsFromResult(hooks), ...backupPathsFromResult(statusline)],
+    hooks,
+    statusline,
+  };
+}
+
+function unregisterClaudeIntegration(options = {}) {
+  const hooks = unregisterClaudeHooks(options);
+  const statusline = unregisterClaudeStatusline(options);
+  return {
+    removed: removedCountFromResult(hooks) + removedCountFromResult(statusline),
+    changed: changedFromResult(hooks) || changedFromResult(statusline),
+    backupPaths: [...backupPathsFromResult(hooks), ...backupPathsFromResult(statusline)],
+    hooks,
+    statusline,
+  };
+}
+
 const AGENT_CLEANERS = Object.freeze({
-  "claude-code": unregisterClaudeHooks,
+  "claude-code": unregisterClaudeIntegration,
   "gemini-cli": unregisterGeminiHooks,
-  "antigravity-cli": unregisterAntigravityHooks,
+  "antigravity-cli": unregisterAntigravityIntegration,
   "cursor-agent": unregisterCursorHooks,
   "copilot-cli": unregisterCopilotHooks,
   codebuddy: unregisterCodeBuddyHooks,
   "kiro-cli": unregisterKiroHooks,
   "kimi-cli": unregisterKimiHooks,
   "qwen-code": unregisterQwenCodeHooks,
+  zcode: unregisterZcodeHooks,
   codewhale: unregisterCodewhaleHooks,
   codex: unregisterCodexCommandHooks,
   opencode: unregisterOpencodePlugin,
+  mimocode: unregisterMimocodePlugin,
   pi: unregisterPiExtension,
   openclaw: unregisterOpenClawPlugin,
   hermes: unregisterHermesPlugin,
   qoder: unregisterQoderHooks,
   reasonix: unregisterReasonixHooks,
+  qoderwork: unregisterQoderWorkHooks,
+  workbuddy: unregisterWorkBuddyHooks,
 });
 
 function removedCountFromResult(result) {
@@ -286,7 +360,34 @@ function cleanupIntegrations(options = {}) {
     };
 
     try {
-      if (!cleanOptions) {
+      // Claude hooks + statusline may already have been unregistered through
+      // the server-owned operation queue (see main.js's cleanupIntegrations
+      // wrapper for #657) before this function runs. When that precomputed
+      // result is provided, record it instead of unregistering Claude a
+      // second time here, outside the queue.
+      if (agentId === "claude-code" && Object.prototype.hasOwnProperty.call(options, "claudeCleanupResult")) {
+        const result = options.claudeCleanupResult;
+        if (result && result.status === "error") {
+          agent.status = "failed";
+          agent.error = result.message || "Claude hook queue cleanup failed";
+          failed++;
+        } else {
+          const removed = removedCountFromResult(result);
+          const changed = changedFromResult(result);
+          agent.removed = removed;
+          agent.changed = changed;
+          agent.backupPaths = backupPathsFromResult(result);
+          agent.result = result;
+          if (changed || removed > 0) {
+            agent.status = "applied";
+            agentsAffected++;
+          } else {
+            agent.status = "skipped";
+            skipped++;
+          }
+          entriesRemoved += removed;
+        }
+      } else if (!cleanOptions) {
         agent.status = "failed";
         agent.error = "Missing cleanup path overrides";
         failed++;
@@ -304,7 +405,12 @@ function cleanupIntegrations(options = {}) {
         agent.warnings = warningsFromResult(agentId, result);
         agent.notes = notesFromResult(agentId, result);
         agent.result = result;
-        if (changed || removed > 0) {
+        if (result && result.status === "error") {
+          agent.status = "failed";
+          agent.error = result.message || `Failed to clean ${agent.displayName} integration`;
+          failed++;
+          if (changed || removed > 0) agentsAffected++;
+        } else if (changed || removed > 0) {
           agent.status = "applied";
           agentsAffected++;
         } else {

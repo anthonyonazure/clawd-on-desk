@@ -17,10 +17,8 @@
     <rect x="3" y="12" width="9" height="1"/>
     <rect x="3" y="13" width="9" height="1"/>
   </g>
-  <!-- Brim -->
   <rect x="0" y="14" width="15" height="1" fill="#2f2566"/>
   <rect x="1" y="15" width="13" height="1" fill="#2f2566"/>
-  <!-- Stars -->
   <g fill="#ffd84d">
     <rect x="7" y="5" width="1" height="1"/>
     <rect x="6" y="9" width="1" height="1"/>

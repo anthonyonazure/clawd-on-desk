@@ -1,5 +1,7 @@
 "use strict";
 
+const { isCodexDesktopOriginator } = require("../hooks/codex-originator");
+
 const SESSION_STALE_MS = 600000;
 const WORKING_STALE_MS = 300000;
 const DETACHED_IDLE_STALE_MS = 30000;
@@ -14,6 +16,23 @@ function isLocalCodexWorkingLikeSession(session) {
     && session.agentId === "codex"
     && !session.host
     && isWorkingLikeState(session.state);
+}
+
+function isLocalCodexDesktopIdleSession(session) {
+  return !!session
+    && session.agentId === "codex"
+    && !session.host
+    && !session.headless
+    && session.state === "idle"
+    && isCodexDesktopOriginator(session.codexOriginator);
+}
+
+function isLocalZcodeDesktopIdleSession(session) {
+  return !!session
+    && session.agentId === "zcode"
+    && !session.host
+    && !session.headless
+    && session.state === "idle";
 }
 
 function getStaleSessionDecision(session, options = {}) {
@@ -57,6 +76,29 @@ function getStaleSessionDecision(session, options = {}) {
     Number(session.ackedAt) || 0
   );
   const age = now - referenceTs;
+
+  // Codex Desktop threads share one long-lived app-server PID and do not emit
+  // SessionEnd. A live process therefore cannot keep an individual idle thread
+  // alive forever; use the existing user-configured idle-age cutoff instead.
+  if (
+    sessionStaleMs > 0
+    && age > sessionStaleMs
+    && isLocalCodexDesktopIdleSession(session)
+  ) {
+    return { action: "delete", reason: "codex-desktop-idle-timeout" };
+  }
+
+  // ZCode desktop conversations have no SessionEnd event and can share the
+  // app's long-lived app-server PID. Once source_pid is correctly anchored to
+  // ZCode.exe, process liveness alone cannot retire an individual closed
+  // conversation, so apply the same configured idle cutoff as Codex Desktop.
+  if (
+    sessionStaleMs > 0
+    && age > sessionStaleMs
+    && isLocalZcodeDesktopIdleSession(session)
+  ) {
+    return { action: "delete", reason: "zcode-desktop-idle-timeout" };
+  }
 
   // NOTE: requiresCompletionAck does NOT hold a session out of stale cleanup.
   // The completion notification (e.g. Telegram push) already fires once at the
@@ -114,5 +156,6 @@ module.exports = {
   CODEX_LOCAL_WORKING_STALE_FLOOR_MS,
   isWorkingLikeState,
   isLocalCodexWorkingLikeSession,
+  isLocalZcodeDesktopIdleSession,
   getStaleSessionDecision,
 };

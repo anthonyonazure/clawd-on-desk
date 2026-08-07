@@ -159,6 +159,14 @@ module.exports = function initUpdateBubble(ctx) {
   let autoCloseTimer = null;
   let visibleSince = 0;
 
+  function notifyOrbitGeometryChanged() {
+    const reposition = typeof ctx.repositionQuotaRing === "function"
+      ? ctx.repositionQuotaRing
+      : ctx.repositionSessionHud;
+    if (typeof reposition !== "function") return;
+    try { reposition(); } catch {}
+  }
+
   function getTextScale() {
     return clampTextScale(typeof ctx.getTextScale === "function" ? ctx.getTextScale() : 1);
   }
@@ -206,6 +214,7 @@ module.exports = function initUpdateBubble(ctx) {
     bubble.on("closed", () => {
       bubble = null;
       measuredHeight = 0;
+      notifyOrbitGeometryChanged();
       if (resolveAction) {
         const fallback = activePayload && activePayload.defaultAction != null ? activePayload.defaultAction : null;
         const resolver = resolveAction;
@@ -356,6 +365,7 @@ module.exports = function initUpdateBubble(ctx) {
       if (win && !win.isDestroyed()) {
         win.webContents.send("update-bubble-show", payload);
         syncVisibility();
+        notifyOrbitGeometryChanged();
         scheduleAutoClose(payload);
       }
     };
@@ -383,7 +393,10 @@ module.exports = function initUpdateBubble(ctx) {
     visibleSince = 0;
     if (hideTimer) clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
-      if (bubble && !bubble.isDestroyed()) bubble.hide();
+      if (bubble && !bubble.isDestroyed()) {
+        bubble.hide();
+        notifyOrbitGeometryChanged();
+      }
     }, 250);
   }
 
@@ -405,6 +418,25 @@ module.exports = function initUpdateBubble(ctx) {
   function handleUpdateBubbleAction(event, actionId) {
     const senderWin = BrowserWindow.fromWebContents(event.sender);
     if (!bubble || senderWin !== bubble) return;
+    if (actionId === "copy-error") {
+      const feedback = activePayload && activePayload.copyFeedback || {};
+      let status = "ok";
+      try {
+        if (!ctx.clipboard || typeof ctx.clipboard.writeText !== "function") {
+          throw new Error("clipboard unavailable");
+        }
+        ctx.clipboard.writeText(String(activePayload && activePayload.copyText || ""));
+      } catch (_) {
+        status = "error";
+      }
+      if (bubble && !bubble.isDestroyed()) {
+        bubble.webContents.send("update-bubble-copy-result", {
+          status,
+          label: status === "ok" ? feedback.copied : feedback.failed,
+        });
+      }
+      return;
+    }
     hideUpdateBubble();
     resolveCurrentAction(actionId);
   }
@@ -415,6 +447,7 @@ module.exports = function initUpdateBubble(ctx) {
     if (typeof height === "number" && height > 0) {
       measuredHeight = Math.ceil(height);
       repositionUpdateBubble();
+      notifyOrbitGeometryChanged();
     }
   }
 

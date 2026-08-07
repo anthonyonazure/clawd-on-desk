@@ -1,5 +1,7 @@
 "use strict";
 
+const { canOfferLocalFolder, focusUnavailableReasonKey } = globalThis.ClawdSessionFocusUnavailable;
+
 const AGENT_LABELS = {
   "claude-code": "Claude Code",
   codex: "Codex",
@@ -10,7 +12,9 @@ const AGENT_LABELS = {
   "kiro-cli": "Kiro",
   "kimi-cli": "Kimi",
   opencode: "opencode",
+  mimocode: "MiMo Code",
   codebuddy: "CodeBuddy",
+  workbuddy: "WorkBuddy",
   pi: "Pi",
   openclaw: "OpenClaw",
 };
@@ -19,9 +23,14 @@ let snapshot = { sessions: [], groups: [], orderedIds: [] };
 let i18nPayload = { lang: "en", translations: {} };
 let activeEdit = null;
 
+const SESSION_FOLDER_FEEDBACK_MS = 4000;
+const sessionFolderActionState = new Map();
+const sessionAutomationActionState = new Map();
+
 const titleEl = document.getElementById("title");
 const countEl = document.getElementById("count");
 const contentEl = document.getElementById("content");
+const quotaSummaryEl = document.getElementById("quotaSummary");
 
 function t(key) {
   const dict = i18nPayload && i18nPayload.translations ? i18nPayload.translations : {};
@@ -62,6 +71,293 @@ function contextUsageText(session) {
   return t("dashboardContextUsageUnknownLimit").replace("{used}", used);
 }
 
+// Account-wide rate-limit quota, shown once at the top of the dashboard -
+// grouped per reporting source (this machine + one group per remote host;
+// snapshot.accountQuota, fed by src/state-account-quota.js), because local
+// and remote can be different subscriptions. Freshest-wins applies within
+// a source only. Provider sections cover Antigravity's own /usage (Gemini +
+// Claude/GPT-via-agy), Claude Code's rate_limits, Codex's generic rollout
+// rate_limits, and Dashboard-only Codex Spark quota.
+const QUOTA_WARNING_THRESHOLD = 90;
+// A source that has not confirmed its numbers recently gets an explicit
+// "as of N ago" label instead of presenting old numbers as live.
+const QUOTA_STALE_AFTER_MS = 5 * 60 * 1000;
+
+function formatDurationHM(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0
+    ? t("dashboardQuotaResetHoursMinutes").replace("{h}", hours).replace("{m}", minutes)
+    : t("dashboardQuotaResetMinutes").replace("{m}", minutes);
+}
+
+function formatResetIn(resetAt) {
+  const n = Number(resetAt);
+  if (!Number.isFinite(n)) return "";
+  const secondsLeft = Math.round((n - Date.now()) / 1000);
+  if (secondsLeft < 0) return "";
+  return formatDurationHM(Math.round(secondsLeft / 60));
+}
+
+function formatAsOf(updatedAt) {
+  const n = Number(updatedAt);
+  if (!Number.isFinite(n)) return "";
+  const agoMinutes = Math.round((Date.now() - n) / 60000);
+  if (agoMinutes < 1) return "";
+  return t("dashboardQuotaAsOf").replace("{time}", formatDurationHM(agoMinutes));
+}
+
+// The rate-limit windows reset on wall clock regardless of CLI activity, so
+// a bucket whose resetAt has passed would show the pre-reset high - worse
+// than showing nothing. The store already drops expired buckets at snapshot
+// time; this guard covers buckets that expire between snapshots (the
+// dashboard rerenders on its own tick).
+function isExpiredBucket(bucket) {
+  return Number.isFinite(bucket.resetAt) && bucket.resetAt <= Date.now();
+}
+
+function liveBucket(group, field) {
+  const bucket = group && group[field];
+  if (!bucket || typeof bucket !== "object") return null;
+  // Window reset on wall clock: render as 0% (nothing reported since the
+  // reset) rather than the pre-reset high or a vanished bar.
+  if (bucket.expired === true || isExpiredBucket(bucket)) {
+    return { ...bucket, usedPercent: 0, expired: true };
+  }
+  return bucket;
+}
+
+function formatQuotaWindowLabel(bucket, fallbackLabel) {
+  const minutes = Number(bucket && bucket.windowMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return fallbackLabel;
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}d`;
+  if (minutes % 60 === 0) return `${minutes / 60}h`;
+  return `${Math.round(minutes)}m`;
+}
+
+function quotaResetStyle(bucket, fallbackStyle) {
+  const minutes = Number(bucket && bucket.windowMinutes);
+  if (!Number.isFinite(minutes) || minutes <= 0) return fallbackStyle;
+  return minutes >= 24 * 60 ? "date" : "countdown";
+}
+
+// renderQuotaSummary can run once a second (see the setInterval(render, 1000)
+// tick below) - cache the formatter per lang instead of constructing a new
+// Intl.DateTimeFormat on every call.
+let resetDateFormatterLang = null;
+let resetDateFormatter = null;
+
+function formatResetDate(resetAt) {
+  const n = Number(resetAt);
+  if (!Number.isFinite(n)) return "";
+  const lang = (i18nPayload && i18nPayload.lang) || "en";
+  try {
+    if (!resetDateFormatter || resetDateFormatterLang !== lang) {
+      resetDateFormatter = new Intl.DateTimeFormat(lang, { month: "short", day: "numeric" });
+      resetDateFormatterLang = lang;
+    }
+    return resetDateFormatter.format(n);
+  } catch (_err) {
+    return "";
+  }
+}
+
+// One row (or two for Antigravity) per source that has live data for the
+// provider. Source labels appear only when they carry information: a single
+// local-only source renders exactly the compact pre-grouping layout, and a
+// fresh source shows no "as of" suffix.
+function buildQuotaSourceHeader(sourceEntry, providerEntry, baseLabel) {
+  const parts = [];
+  const multiSource = sourceEntry.multiSource === true;
+  if (multiSource) {
+    parts.push(sourceEntry.host || t("dashboardQuotaSourceLocal"));
+  }
+  if (baseLabel) parts.push(baseLabel);
+  // lastSeenAt (last confirmation), not updatedAt (last value change): a
+  // reporter confirming the same numbers every minute is alive, not stale.
+  // Fallback covers snapshots that predate lastSeenAt.
+  const seenAt = Number(providerEntry.lastSeenAt ?? providerEntry.updatedAt ?? 0);
+  const age = Date.now() - seenAt;
+  if (Number.isFinite(age) && age > QUOTA_STALE_AFTER_MS) {
+    const asOf = formatAsOf(seenAt);
+    if (asOf) parts.push(asOf);
+  }
+  return parts.length ? parts.join(" · ") : null;
+}
+
+function buildQuotaHalfBar(labelText, bucket, resetStyle) {
+  const half = document.createElement("div");
+  half.className = "quota-half";
+
+  const labelRow = document.createElement("div");
+  labelRow.className = "quota-label-row";
+  labelRow.appendChild(createText("span", "quota-label", labelText));
+  const percentText = `${bucket.usedPercent}%`;
+  let resetText = "";
+  if (Number.isFinite(bucket.resetAt)) {
+    resetText = resetStyle === "date"
+      ? t("dashboardQuotaResetOn").replace("{date}", formatResetDate(bucket.resetAt))
+      : t("dashboardQuotaResetIn").replace("{time}", formatResetIn(bucket.resetAt));
+  }
+  const bucketSeenAt = Number(bucket.lastSeenAt);
+  const asOf = Number.isFinite(bucketSeenAt) && Date.now() - bucketSeenAt > QUOTA_STALE_AFTER_MS
+    ? formatAsOf(bucketSeenAt)
+    : "";
+  const details = [percentText, resetText, asOf].filter(Boolean).join(" · ");
+  labelRow.appendChild(createText("span", "quota-percent", details));
+  half.appendChild(labelRow);
+
+  const track = document.createElement("div");
+  track.className = "quota-bar-track";
+  const fill = document.createElement("div");
+  fill.className = bucket.usedPercent >= QUOTA_WARNING_THRESHOLD ? "quota-bar-fill quota-bar-fill-warning" : "quota-bar-fill";
+  fill.style.width = `${Math.max(0, Math.min(100, bucket.usedPercent))}%`;
+  track.appendChild(fill);
+  half.appendChild(track);
+
+  return half;
+}
+
+function buildQuotaGroupRow(headerText, fiveHourBucket, weeklyBucket) {
+  if (!fiveHourBucket && !weeklyBucket) return null;
+  const row = document.createElement("div");
+  row.className = "quota-group-row";
+  if (headerText) row.appendChild(createText("div", "quota-group-header", headerText));
+  const halves = document.createElement("div");
+  halves.className = "quota-halves";
+  if (fiveHourBucket) {
+    halves.appendChild(buildQuotaHalfBar(
+      formatQuotaWindowLabel(fiveHourBucket, t("dashboardQuotaFiveHour")),
+      fiveHourBucket,
+      quotaResetStyle(fiveHourBucket, "countdown")
+    ));
+  }
+  if (weeklyBucket) {
+    halves.appendChild(buildQuotaHalfBar(
+      formatQuotaWindowLabel(weeklyBucket, t("dashboardQuotaWeekly")),
+      weeklyBucket,
+      quotaResetStyle(weeklyBucket, "date")
+    ));
+  }
+  row.appendChild(halves);
+  return row;
+}
+
+function buildQuotaSection(headerKey, rows) {
+  const usableRows = rows.filter(Boolean);
+  if (!usableRows.length) return null;
+  const section = document.createElement("div");
+  section.className = "quota-section";
+  section.appendChild(createText("div", "quota-section-header", t(headerKey)));
+  for (const row of usableRows) section.appendChild(row);
+  return section;
+}
+
+// render() re-invokes renderQuotaSummary every second so the "resets in Xh
+// Ym" countdowns stay live even between real quota updates, but that only
+// needs to touch the DOM once a minute (formatResetIn's granularity) or when
+// the underlying quota/lang actually changes - not on every tick. Skipping
+// the rebuild otherwise avoids rebuilding the whole subtree (and re-running
+// every Intl.DateTimeFormat/formatResetIn call inside it) 59 times a minute
+// for nothing.
+let lastQuotaSummarySignature = null;
+
+function computeQuotaSummarySignature(accountQuota) {
+  return JSON.stringify({
+    lang: (i18nPayload && i18nPayload.lang) || "en",
+    minute: accountQuota.length ? Math.floor(Date.now() / 60000) : null,
+    accountQuota,
+  });
+}
+
+function renderQuotaSummary(snapshot) {
+  if (!quotaSummaryEl) return;
+  const accountQuota = Array.isArray(snapshot && snapshot.accountQuota) ? snapshot.accountQuota : [];
+
+  const signature = computeQuotaSummarySignature(accountQuota);
+  if (signature === lastQuotaSummarySignature) return;
+  lastQuotaSummarySignature = signature;
+
+  const multiSource = accountQuota.length > 1;
+  const sources = accountQuota.map((entry) => ({ ...entry, multiSource }));
+
+  const sections = [];
+
+  const antigravityRows = [];
+  for (const source of sources) {
+    const provider = source.antigravityQuota;
+    const group = provider && provider.group;
+    if (!group) continue;
+    antigravityRows.push(
+      buildQuotaGroupRow(
+        buildQuotaSourceHeader(source, provider, t("dashboardQuotaGroupGemini")),
+        liveBucket(group, "geminiFiveHour"),
+        liveBucket(group, "geminiWeekly")
+      ),
+      buildQuotaGroupRow(
+        buildQuotaSourceHeader(source, provider, t("dashboardQuotaGroupThirdParty")),
+        liveBucket(group, "thirdPartyFiveHour"),
+        liveBucket(group, "thirdPartyWeekly")
+      )
+    );
+  }
+  const antigravitySection = buildQuotaSection("dashboardQuotaSectionAntigravity", antigravityRows);
+  if (antigravitySection) sections.push(antigravitySection);
+
+  const claudeRows = sources.map((source) => {
+    const provider = source.claudeQuota;
+    const group = provider && provider.group;
+    if (!group) return null;
+    return buildQuotaGroupRow(
+      buildQuotaSourceHeader(source, provider, null),
+      liveBucket(group, "claudeFiveHour"),
+      liveBucket(group, "claudeWeekly")
+    );
+  });
+  const claudeSection = buildQuotaSection("dashboardQuotaSectionClaudeCode", claudeRows);
+  if (claudeSection) sections.push(claudeSection);
+
+  const codexRows = sources.map((source) => {
+    const provider = source.codexQuota;
+    const group = provider && provider.group;
+    if (!group) return null;
+    return buildQuotaGroupRow(
+      buildQuotaSourceHeader(source, provider, null),
+      liveBucket(group, "codexFiveHour"),
+      liveBucket(group, "codexWeekly")
+    );
+  });
+  const codexSection = buildQuotaSection("dashboardQuotaSectionCodex", codexRows);
+  if (codexSection) sections.push(codexSection);
+
+  const codexSparkRows = sources.map((source) => {
+    const provider = source.codexSparkQuota;
+    const group = provider && provider.group;
+    if (!group) return null;
+    return buildQuotaGroupRow(
+      buildQuotaSourceHeader(source, provider, null),
+      liveBucket(group, "codexFiveHour"),
+      liveBucket(group, "codexWeekly")
+    );
+  });
+  const codexSparkSection = buildQuotaSection(
+    "dashboardQuotaSectionCodexSpark",
+    codexSparkRows
+  );
+  if (codexSparkSection) sections.push(codexSparkSection);
+
+  if (!sections.length) {
+    quotaSummaryEl.hidden = true;
+    quotaSummaryEl.replaceChildren();
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  for (const section of sections) fragment.appendChild(section);
+  quotaSummaryEl.replaceChildren(fragment);
+  quotaSummaryEl.hidden = false;
+}
+
 function badgeLabel(badge) {
   const key = {
     running: "sessionBadgeRunning",
@@ -72,12 +368,12 @@ function badgeLabel(badge) {
   return t(key);
 }
 
-function agentLabel(agentId) {
-  return AGENT_LABELS[agentId] || agentId || t("dashboardUnknownAgent");
+function agentLabel(agentId, agentName) {
+  return AGENT_LABELS[agentId] || agentName || agentId || t("dashboardUnknownAgent");
 }
 
-function agentFallback(agentId) {
-  const label = agentLabel(agentId).trim();
+function agentFallback(agentId, agentName) {
+  const label = agentLabel(agentId, agentName).trim();
   return label ? label.slice(0, 2).toUpperCase() : "?";
 }
 
@@ -103,6 +399,8 @@ function beginTitleEdit(session) {
   if (!session || !session.id) return;
   activeEdit = {
     sessionId: session.id,
+    rawSessionId: session.rawSessionId || session.id,
+    profileId: session.profileId || "local",
     agentId: session.agentId || null,
     host: session.host || null,
     cwd: session.cwd || "",
@@ -133,6 +431,8 @@ async function commitTitleEdit() {
       host: edit.host,
       agentId: edit.agentId,
       sessionId: edit.sessionId,
+      rawSessionId: edit.rawSessionId,
+      profileId: edit.profileId,
       cwd: edit.cwd,
       alias: edit.draft,
     });
@@ -204,12 +504,28 @@ function appendMeta(main, session, now) {
   badge.appendChild(dot);
   badge.appendChild(document.createTextNode(badgeLabel(session.badge)));
 
-  meta.appendChild(document.createTextNode(agentLabel(session.agentId)));
+  meta.appendChild(document.createTextNode(agentLabel(session.agentId, session.agentName)));
   meta.appendChild(document.createTextNode(" · "));
   meta.appendChild(badge);
   meta.appendChild(document.createTextNode(` · ${formatElapsed(now - session.updatedAt)}`));
   if (session.headless) {
     meta.appendChild(document.createTextNode(` · ${t("dashboardHeadless")}`));
+  }
+  if (session.startupRecovered) {
+    meta.appendChild(document.createTextNode(" · "));
+    const recoveryBadge = document.createElement("span");
+    recoveryBadge.className = "recovery-badge";
+    recoveryBadge.textContent = t("sessionRecovered");
+    meta.appendChild(recoveryBadge);
+  }
+  // Source badge: show where this session runs (WSL, SSH)
+  if (session.sourceType && session.sourceType !== "local") {
+    meta.appendChild(document.createTextNode(" · "));
+    const sourceBadge = document.createElement("span");
+    sourceBadge.className = `source-badge source-${session.sourceType}`;
+    sourceBadge.title = session.sourceDisplayLabel || session.sourceLabel || "";
+    sourceBadge.textContent = session.sourceDisplayLabel || session.sourceLabel;
+    meta.appendChild(sourceBadge);
   }
   main.appendChild(meta);
 }
@@ -248,12 +564,12 @@ function createIcon(session) {
     img.alt = "";
     img.src = session.iconUrl;
     img.addEventListener("error", () => {
-      const fallback = createText("span", "agent-fallback", agentFallback(session.agentId));
+      const fallback = createText("span", "agent-fallback", agentFallback(session.agentId, session.agentName));
       img.replaceWith(fallback);
     }, { once: true });
     return img;
   }
-  return createText("span", "agent-fallback", agentFallback(session.agentId));
+  return createText("span", "agent-fallback", agentFallback(session.agentId, session.agentName));
 }
 
 function createHideButton(session) {
@@ -281,9 +597,53 @@ function createHideButton(session) {
   return button;
 }
 
+function focusUnavailableText(session) {
+  return t(focusUnavailableReasonKey(session));
+}
+
+function openFolderFailureText(result) {
+  if (result && result.status === "error" && result.message) {
+    return t("sessionOpenFolderFailed").replace("{reason}", result.message);
+  }
+  return t("sessionOpenFolderUnavailable");
+}
+
+function pruneSessionFolderActionState(sessions, now) {
+  const currentIds = new Set(sessions.map((session) => session && session.id).filter(Boolean));
+  for (const [sessionId, state] of sessionFolderActionState) {
+    if (!currentIds.has(sessionId)
+        || (!state.pending && (!state.feedbackText || state.feedbackUntil <= now))) {
+      sessionFolderActionState.delete(sessionId);
+    }
+  }
+}
+
+function beginSessionFolderAction(sessionId) {
+  const current = sessionFolderActionState.get(sessionId);
+  if (current && current.pending) return false;
+  sessionFolderActionState.set(sessionId, {
+    pending: true,
+    feedbackText: "",
+    feedbackUntil: 0,
+  });
+  return true;
+}
+
+function finishSessionFolderAction(sessionId, feedbackText = "") {
+  if (!feedbackText) {
+    sessionFolderActionState.delete(sessionId);
+    return;
+  }
+  sessionFolderActionState.set(sessionId, {
+    pending: false,
+    feedbackText,
+    feedbackUntil: Date.now() + SESSION_FOLDER_FEEDBACK_MS,
+  });
+}
+
 function createCard(session, now) {
   const card = document.createElement("article");
-  card.className = "card";
+  card.className = session.canFocus === true ? "card" : "card card-unfocusable";
 
   if (session.id) {
     const idTail = String(session.id).slice(-3);
@@ -300,6 +660,7 @@ function createCard(session, now) {
   appendPath(main, session);
   appendEvent(main, session, now);
   appendContextUsage(main, session);
+  appendSessionAutomation(main, session);
   card.appendChild(main);
 
   const actions = document.createElement("div");
@@ -311,6 +672,9 @@ function createCard(session, now) {
     ? t("dashboardOpenCodexSession")
     : t("dashboardJumpTerminal");
   button.disabled = session.canFocus !== true;
+  if (button.disabled) {
+    button.title = focusUnavailableText(session);
+  }
   button.addEventListener("click", async () => {
     window.dashboardAPI.focusSession(session.id);
     // Best-effort ack alongside focus. Most remote-Codex sessions have
@@ -324,6 +688,52 @@ function createCard(session, now) {
   });
   actions.appendChild(button);
 
+  if (session.canFocus !== true) {
+    const reason = focusUnavailableText(session);
+    actions.appendChild(createText("span", "focus-unavailable-reason", reason));
+    const folderState = sessionFolderActionState.get(session.id) || null;
+    const feedback = createText(
+      "span",
+      "session-action-feedback",
+      folderState && folderState.feedbackUntil > now ? folderState.feedbackText : ""
+    );
+    feedback.setAttribute("aria-live", "polite");
+    actions.appendChild(feedback);
+
+    if (canOfferLocalFolder(session)) {
+      const openFolder = document.createElement("button");
+      openFolder.type = "button";
+      openFolder.className = "open-folder-button";
+      openFolder.textContent = t("dashboardOpenFolder");
+      openFolder.disabled = !!(folderState && folderState.pending);
+      openFolder.addEventListener("click", async () => {
+        if (!beginSessionFolderAction(session.id)) return;
+        openFolder.disabled = true;
+        feedback.textContent = "";
+        render();
+        try {
+          const result = await window.dashboardAPI.openSessionFolder(session.id);
+          if (!result || result.status !== "ok") {
+            const message = openFolderFailureText(result);
+            finishSessionFolderAction(session.id, message);
+            feedback.textContent = message;
+          } else {
+            finishSessionFolderAction(session.id);
+          }
+        } catch (err) {
+          const message = t("sessionOpenFolderFailed")
+            .replace("{reason}", err && err.message ? err.message : String(err));
+          finishSessionFolderAction(session.id, message);
+          feedback.textContent = message;
+          console.warn("open session folder threw:", err);
+        }
+        openFolder.disabled = false;
+        render();
+      });
+      actions.appendChild(openFolder);
+    }
+  }
+
   if (session.requiresCompletionAck === true) {
     actions.appendChild(createMarkReadButton(session));
   }
@@ -331,6 +741,107 @@ function createCard(session, now) {
   card.appendChild(actions);
 
   return card;
+}
+
+function automationActionKey(session) {
+  return session && session.id ? `session:${session.id}` : "";
+}
+
+function automationActionState(key) {
+  const state = key ? sessionAutomationActionState.get(key) : null;
+  return state && typeof state === "object"
+    ? state
+    : { pending: false, feedbackText: "" };
+}
+
+function appendSessionAutomation(container, session) {
+  if (!container || !session) return;
+  const row = document.createElement("div");
+  row.className = "session-automation-row";
+  const label = createText("span", "session-automation-label", t("sessionAutomationLabel"));
+  const select = document.createElement("select");
+  select.className = "session-automation-select";
+  select.setAttribute("aria-label", t("sessionAutomationLabel"));
+
+  const values = [
+    ["inherit", t("sessionAutomationFollowGlobal")],
+    ["off", t("sessionAutomationAsk")],
+    ["auto-tools", t("sessionAutomationAutoTools")],
+  ];
+  for (const [value, text] of values) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    if (
+      session.canConfigureSessionAutomation !== true
+      && value !== "inherit"
+    ) {
+      option.disabled = true;
+    }
+    select.appendChild(option);
+  }
+  select.value = session.sessionAutomationMode || "inherit";
+  const key = automationActionKey(session);
+  const actionState = automationActionState(key);
+  select.disabled = actionState.pending === true
+    || (
+      session.canConfigureSessionAutomation !== true
+      && !session.sessionAutomationGrantId
+    );
+  if (session.canConfigureSessionAutomation !== true) {
+    select.title = t("sessionAutomationUnavailable");
+  }
+  const feedback = createText(
+    "span",
+    "session-automation-feedback",
+    actionState.feedbackText
+  );
+  select.addEventListener("change", async () => {
+    if (!window.dashboardAPI) return;
+    const previousValue = session.sessionAutomationMode || "inherit";
+    const nextValue = select.value;
+    sessionAutomationActionState.set(key, {
+      pending: true,
+      feedbackText: "",
+    });
+    select.disabled = true;
+    feedback.textContent = "";
+    let result;
+    try {
+      if (nextValue === "inherit") {
+        result = session.sessionAutomationGrantId
+          ? await window.dashboardAPI.clearSessionAutomationGrant({
+            grantId: session.sessionAutomationGrantId,
+          })
+          : { status: "equivalent" };
+      } else {
+        result = await window.dashboardAPI.setSessionAutomationOverride({
+          sessionId: session.id,
+          mode: nextValue,
+        });
+      }
+    } catch (err) {
+      result = { status: "error", message: err && err.message };
+    }
+    if (!result || !["applied", "equivalent"].includes(result.status)) {
+      select.value = previousValue;
+      if (result && result.status === "cancelled") {
+        sessionAutomationActionState.delete(key);
+      } else {
+        sessionAutomationActionState.set(key, {
+          pending: false,
+          feedbackText: t("sessionAutomationChangeFailed"),
+        });
+      }
+    } else {
+      sessionAutomationActionState.delete(key);
+    }
+    render();
+  });
+  row.appendChild(label);
+  row.appendChild(select);
+  row.appendChild(feedback);
+  container.appendChild(row);
 }
 
 function createMarkReadButton(session) {
@@ -374,20 +885,133 @@ function renderEmpty() {
   contentEl.replaceChildren(empty);
 }
 
+function createSessionAutomationOrphan(record) {
+  const card = document.createElement("article");
+  card.className = "automation-orphan-card";
+  const main = document.createElement("div");
+  main.className = "automation-orphan-main";
+  main.appendChild(createText(
+    "div",
+    "automation-orphan-title",
+    record.displayLabel || record.sessionId || record.agentId
+  ));
+  main.appendChild(createText(
+    "div",
+    "automation-orphan-meta",
+    `${AGENT_LABELS[record.agentId] || record.agentId} · ${
+      record.mode === "auto-tools"
+        ? t("sessionAutomationAutoTools")
+        : t("sessionAutomationAsk")
+    }`
+  ));
+  card.appendChild(main);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = t("sessionAutomationRevoke");
+  const key = `grant:${record.sessionAutomationGrantId}`;
+  const actionState = automationActionState(key);
+  button.disabled = actionState.pending === true;
+  main.appendChild(createText(
+    "div",
+    "session-automation-feedback",
+    actionState.feedbackText
+  ));
+  button.addEventListener("click", async () => {
+    if (!record.sessionAutomationGrantId) return;
+    sessionAutomationActionState.set(key, {
+      pending: true,
+      feedbackText: "",
+    });
+    button.disabled = true;
+    let result;
+    try {
+      result = await window.dashboardAPI.clearSessionAutomationGrant({
+        grantId: record.sessionAutomationGrantId,
+      });
+    } catch (err) {
+      console.warn("clear orphan session automation grant threw:", err);
+      result = { status: "error" };
+    }
+    if (result && ["applied", "equivalent"].includes(result.status)) {
+      sessionAutomationActionState.delete(key);
+    } else {
+      sessionAutomationActionState.set(key, {
+        pending: false,
+        feedbackText: t("sessionAutomationChangeFailed"),
+      });
+    }
+    render();
+  });
+  card.appendChild(button);
+  return card;
+}
+
+function appendSessionAutomationOrphans(fragment) {
+  const orphans = Array.isArray(snapshot.sessionAutomationOrphans)
+    ? snapshot.sessionAutomationOrphans
+    : [];
+  if (!orphans.length) return;
+  const section = document.createElement("section");
+  section.className = "group automation-orphans";
+  section.appendChild(createText("h2", "group-title", t("sessionAutomationOrphansTitle")));
+  section.appendChild(createText(
+    "p",
+    "automation-orphans-hint",
+    t("sessionAutomationOrphansHint")
+  ));
+  const cards = document.createElement("div");
+  cards.className = "cards";
+  for (const record of orphans) cards.appendChild(createSessionAutomationOrphan(record));
+  section.appendChild(cards);
+  fragment.appendChild(section);
+}
+
+function hasFocusedSessionAutomationSelect() {
+  const active = document.activeElement;
+  return !!(
+    active
+    && active.tagName === "SELECT"
+    && active.classList
+    && active.classList.contains("session-automation-select")
+    && contentEl.contains(active)
+  );
+}
+
 function render(options = {}) {
-  if (activeEdit && !options.force) return;
+  // The one-second elapsed-time tick normally rebuilds the entire card tree.
+  // Replacing a focused native <select> closes its open menu on Windows, so
+  // defer ordinary snapshot/timer renders until the user finishes choosing.
+  if ((activeEdit || hasFocusedSessionAutomationSelect()) && !options.force) return;
   const sessions = Array.isArray(snapshot.sessions) ? snapshot.sessions : [];
   const count = sessions.length;
+  const now = Date.now();
+  const liveAutomationActionKeys = new Set(
+    sessions.map((session) => automationActionKey(session)).filter(Boolean)
+  );
+  for (const record of Array.isArray(snapshot.sessionAutomationOrphans)
+    ? snapshot.sessionAutomationOrphans
+    : []) {
+    if (record && record.sessionAutomationGrantId) {
+      liveAutomationActionKeys.add(`grant:${record.sessionAutomationGrantId}`);
+    }
+  }
+  for (const key of sessionAutomationActionState.keys()) {
+    if (!liveAutomationActionKeys.has(key)) sessionAutomationActionState.delete(key);
+  }
+  pruneSessionFolderActionState(sessions, now);
   titleEl.textContent = t("dashboardWindowTitle");
   countEl.textContent = t("dashboardCount").replace("{n}", count);
   document.title = t("dashboardWindowTitle");
+  renderQuotaSummary(snapshot);
 
-  if (count === 0) {
+  const orphanCount = Array.isArray(snapshot.sessionAutomationOrphans)
+    ? snapshot.sessionAutomationOrphans.length
+    : 0;
+  if (count === 0 && orphanCount === 0) {
     renderEmpty();
     return;
   }
 
-  const now = Date.now();
   const byId = new Map(sessions.map((session) => [session.id, session]));
   const fragment = document.createDocumentFragment();
 
@@ -398,7 +1022,7 @@ function render(options = {}) {
 
     const section = document.createElement("section");
     section.className = "group";
-    const host = group.host || "";
+    const host = group.displayHost || group.host || "";
     section.appendChild(createText("h2", "group-title", host || t("sessionLocal")));
 
     const cards = document.createElement("div");
@@ -409,6 +1033,7 @@ function render(options = {}) {
     section.appendChild(cards);
     fragment.appendChild(section);
   }
+  appendSessionAutomationOrphans(fragment);
 
   contentEl.replaceChildren(fragment);
 }

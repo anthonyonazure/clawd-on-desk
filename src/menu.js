@@ -1,8 +1,9 @@
 "use strict";
 
-const { app, BrowserWindow, screen, Menu, Tray, nativeImage, dialog } = require("electron");
+const { app, BrowserWindow, screen, Menu, Tray, nativeImage } = require("electron");
 const path = require("path");
 const { keepOutOfTaskbar } = require("./taskbar");
+const { loadTrayNormalIcon } = require("./tray-flash-icon");
 
 const isMac = process.platform === "darwin";
 const isWin = process.platform === "win32";
@@ -20,32 +21,6 @@ const SIZES = {
   M: { width: 280, height: 280 },
   L: { width: 360, height: 360 },
 };
-
-// ── Cosmetic accessories (the pet's wardrobe) ──
-// id must match the prefs `accessory` enum + the renderer's ACCESSORY_ASSETS
-// map. Add new hats/items here and they show up in the Accessories submenu.
-const ACCESSORIES = [
-  { id: "none", labelKey: "accessoryNone" },
-  { id: "cowboy-hat", labelKey: "accessoryCowboyHat" },
-  { id: "party-hat", labelKey: "accessoryPartyHat" },
-  { id: "wizard-hat", labelKey: "accessoryWizardHat" },
-  { id: "top-hat", labelKey: "accessoryTopHat" },
-  { id: "santa-hat", labelKey: "accessorySantaHat" },
-  { id: "pumpkin-hat", labelKey: "accessoryPumpkinHat" },
-  { id: "halo", labelKey: "accessoryHalo" },
-  { id: "seasonal", labelKey: "accessorySeasonal" },
-];
-
-// ── Pet color tints (palette swaps) ──
-// id must match the prefs `petTint` enum + the renderer's TINT_FILTERS map.
-const PET_TINTS = [
-  { id: "none", labelKey: "tintNone" },
-  { id: "midnight", labelKey: "tintMidnight" },
-  { id: "gold", labelKey: "tintGold" },
-  { id: "vaporwave", labelKey: "tintVaporwave" },
-  { id: "matcha", labelKey: "tintMatcha" },
-  { id: "mono", labelKey: "tintMono" },
-];
 
 // i18n string pool + translator factory live in src/i18n.js so the future
 // settings panel can share them. menu.js binds the translator to ctx.lang.
@@ -96,78 +71,113 @@ module.exports = function initMenu(ctx) {
     };
   }
 
-  // DANGER "auto-pilot" quick toggle. Enabling auto-approves EVERY agent
-  // permission request with no prompt, so the enable path is gated behind a
-  // native modal confirm. Disabling is immediate. After either decision we
-  // rebuild menus so the checkbox reflects the committed value (Electron has
-  // already flipped the visual optimistically on click).
-  function buildAutoApproveMenuItem() {
-    return {
-      label: t("menuAutoApproveAll"),
-      type: "checkbox",
-      checked: !!ctx.autoApproveAllPermissions,
-      click: (menuItem) => {
-        const wantOn = menuItem.checked;
-        if (!wantOn) {
-          ctx.autoApproveAllPermissions = false;
-          return;
+  function getPermissionAutomationMode() {
+    const mode = ctx.permissionAutomationMode;
+    return mode === "auto-tools" || mode === "unattended" ? mode : "off";
+  }
+
+  function permissionAutomationModeLabel(mode) {
+    if (mode === "auto-tools") return t("permissionAutomationAutoTools");
+    if (mode === "unattended") return t("permissionAutomationUnattended");
+    return t("permissionAutomationOff");
+  }
+
+  function isPermissionAutomationWarningDismissed(mode) {
+    return typeof ctx.isPermissionAutomationWarningDismissed === "function"
+      && ctx.isPermissionAutomationWarningDismissed(mode) === true;
+  }
+
+  function reportPermissionAutomationFailure(reason) {
+    const message = reason && reason.message
+      ? reason.message
+      : (typeof reason === "string" ? reason : "Unknown error");
+    console.warn("Clawd: permission automation mode change failed:", message);
+    try {
+      return Promise.resolve(ctx.showPermissionAutomationError({
+        lang: ctx.lang,
+        title: t("menuPermissionAutomation"),
+        detail: message,
+        dismissLabel: t("dismiss"),
+      })).catch((err) => {
+        console.warn("Clawd: permission automation error window failed:", err && err.message);
+      });
+    } catch (err) {
+      console.warn("Clawd: permission automation error window failed:", err && err.message);
+      return Promise.resolve();
+    }
+  }
+
+  function applyPermissionAutomationMode(mode, options) {
+    return Promise.resolve()
+      .then(() => ctx.setPermissionAutomationMode(mode, options))
+      .then((result) => {
+        if (result && result.status === "error") {
+          return reportPermissionAutomationFailure(result);
         }
-        // Revert the optimistic check until the user confirms.
-        menuItem.checked = false;
-        // No parent window: attaching the dialog to ctx.win (the small pet
-        // window) makes macOS render it as a sheet centered on the pet. A
-        // parentless dialog is a standalone window centered on the screen,
-        // which is what a danger confirmation should be.
-        Promise.resolve(
-          dialog.showMessageBox({
-            type: "warning",
-            buttons: [t("autoApproveAllConfirmEnable"), t("autoApproveAllConfirmCancel")],
-            defaultId: 1,
-            cancelId: 1,
-            title: t("autoApproveAllConfirmTitle"),
-            message: t("autoApproveAllConfirmTitle"),
-            detail: t("autoApproveAllConfirmDetail"),
-          })
-        ).then((res) => {
-          if (res && res.response === 0) {
-            ctx.autoApproveAllPermissions = true;
-          }
-          rebuildAllMenus();
-        }).catch((err) => {
-          console.warn("Clawd: auto-pilot confirm failed:", err && err.message);
-          rebuildAllMenus();
-        });
-      },
-    };
+        return result;
+      })
+      .catch((err) => reportPermissionAutomationFailure(err));
   }
 
-  // Accessories submenu: radio list of the pet's wardrobe. Writing ctx.accessory
-  // routes through the settings controller, which persists + broadcasts
-  // "set-accessory" to the renderer (see settings-effect-router).
-  function buildAccessoryMenuItem() {
-    const current = ctx.accessory;
-    return {
-      label: t("accessories"),
-      submenu: ACCESSORIES.map((a) => ({
-        label: t(a.labelKey),
-        type: "radio",
-        checked: current === a.id,
-        click: () => { ctx.accessory = a.id; },
-      })),
+  // Three explicit radio choices avoid hiding a materially different trust
+  // boundary behind one checkbox. Both automatic modes require confirmation;
+  // off is immediate.
+  function buildPermissionAutomationMenuItem() {
+    const current = getPermissionAutomationMode();
+    const options = ["off", "auto-tools", "unattended"];
+    const setMode = (mode) => {
+      if (mode === current) return;
+      if (mode === "off") {
+        applyPermissionAutomationMode("off", { confirmed: false })
+          .finally(() => rebuildAllMenus());
+        return;
+      }
+      const unattended = mode === "unattended";
+      if (isPermissionAutomationWarningDismissed(mode)) {
+        applyPermissionAutomationMode(mode, { confirmed: false })
+          .finally(() => rebuildAllMenus());
+        return;
+      }
+      Promise.resolve(
+        ctx.confirmPermissionAutomation({
+          mode,
+          lang: ctx.lang,
+          title: t(unattended
+            ? "permissionAutomationUnattendedConfirmTitle"
+            : "permissionAutomationAutoToolsConfirmTitle"),
+          detail: t(unattended
+            ? "permissionAutomationUnattendedConfirmDetail"
+            : "permissionAutomationAutoToolsConfirmDetail"),
+          checkboxLabel: t(unattended
+            ? "permissionAutomationUnattendedDontShowAgain"
+            : "permissionAutomationAutoToolsDontShowAgain"),
+          confirmLabel: t(unattended
+            ? "permissionAutomationEnableUnattended"
+            : "permissionAutomationEnableAutoTools"),
+          cancelLabel: t("permissionAutomationCancel"),
+        })
+      ).then((res) => {
+        if (res && res.confirmed === true) {
+          return applyPermissionAutomationMode(mode, {
+            confirmed: true,
+            suppressFutureConfirmation: res.suppressFutureConfirmation === true,
+          });
+        }
+        return undefined;
+      }).catch((err) => {
+        return reportPermissionAutomationFailure(err);
+      }).finally(() => {
+        rebuildAllMenus();
+      });
     };
-  }
 
-  // Pet color submenu: radio list of palette tints. Writing ctx.petTint routes
-  // through the settings controller (persist + broadcast "set-pet-tint").
-  function buildPetTintMenuItem() {
-    const current = ctx.petTint;
     return {
-      label: t("petColor"),
-      submenu: PET_TINTS.map((p) => ({
-        label: t(p.labelKey),
+      label: `${t("menuPermissionAutomation")}: ${permissionAutomationModeLabel(current)}`,
+      submenu: options.map((mode) => ({
+        label: permissionAutomationModeLabel(mode),
         type: "radio",
-        checked: current === p.id,
-        click: () => { ctx.petTint = p.id; },
+        checked: current === mode,
+        click: () => setMode(mode),
       })),
     };
   }
@@ -208,13 +218,13 @@ module.exports = function initMenu(ctx) {
   // ── System tray ──
   function createTray() {
     if (ctx.tray) return;
-    let icon;
-    if (isMac) {
-      icon = nativeImage.createFromPath(path.join(__dirname, "../assets/tray-iconTemplate.png"));
-      icon.setTemplateImage(true);
-    } else {
-      icon = nativeImage.createFromPath(path.join(__dirname, "../assets/tray-icon.png")).resize({ width: 32, height: 32 });
-    }
+    // Shared with the completion flash so both frames keep the same size (#722).
+    const icon = loadTrayNormalIcon({
+      nativeImage,
+      platform: process.platform,
+      templatePath: path.join(__dirname, "../assets/tray-iconTemplate.png"),
+      iconPath: path.join(__dirname, "../assets/icon.png"),
+    });
     ctx.tray = new Tray(icon);
     ctx.tray.setToolTip("Clawd Desktop Pet");
     buildTrayMenu();
@@ -274,8 +284,6 @@ module.exports = function initMenu(ctx) {
         checked: ctx.testReactionsEnabled,
         click: (menuItem) => { ctx.testReactionsEnabled = menuItem.checked; },
       },
-      buildAccessoryMenuItem(),
-      buildPetTintMenuItem(),
     ];
 
     // Dashboard + the danger auto-approve toggle (danger last, as in the
@@ -287,7 +295,7 @@ module.exports = function initMenu(ctx) {
           if (typeof ctx.openDashboard === "function") ctx.openDashboard();
         },
       },
-      buildAutoApproveMenuItem(),
+      buildPermissionAutomationMenuItem(),
     ];
 
     // OS-integration / placement group: bring-to-primary, mac dock/menu-bar,
@@ -517,12 +525,10 @@ module.exports = function initMenu(ctx) {
           },
         ],
       },
-      buildAccessoryMenuItem(),
-      buildPetTintMenuItem(),
       // Danger auto-approve sits at the tail of the work group: it governs how
       // agent permission requests are handled, and keeping it here (rather than
       // near the top) makes it harder to hit by accident.
-      buildAutoApproveMenuItem(),
+      buildPermissionAutomationMenuItem(),
     ];
 
     // Display group: just the multi-display "send to display" entry. The mac

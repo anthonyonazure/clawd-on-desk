@@ -9,6 +9,7 @@
     "flashTaskbarOnComplete",
     "flashIntervalMs",
     "flashDurationMs",
+    "testReactionsEnabled",
     "soundVolume",
     "lowPowerIdleMode",
     "keepAwakeWhileWorking",
@@ -16,18 +17,19 @@
     "sessionHudShowStateLabels",
     "sessionHudShowElapsed",
     "sessionHudShowContextUsage",
+    "sessionHudShowQuota",
+    "claudeQuotaCollectionEnabled",
+    "quotaMergeSources",
     "sessionHudCleanupDetached",
     "allowEdgePinning",
     "disableMiniMode",
     "freeRoam",
+    "roamConstrainAxis",
     "keepSizeAcrossDisplays",
-    "manageClaudeHooksAutomatically",
     "openAtLogin",
-    "autoStartWithClaude",
     "hideBubbles",
     "bubbleFollowPet",
     "permissionBubblesEnabled",
-    "autoApproveAllPermissions",
     "notificationBubbleAutoCloseSeconds",
     "updateBubbleAutoCloseSeconds",
     "sessionStaleMs",
@@ -67,20 +69,107 @@
     "sessionHudShowContextUsage",
     "sessionHudCleanupDetached",
   ]);
-  const CLAUDE_HOOK_MANAGEMENT_CHILD_SWITCH_KEYS = [
-    "autoStartWithClaude",
-  ];
   const BUBBLE_SECONDS_AUTO_COMMIT_DELAY_MS = 600;
+  const PERMISSION_AUTOMATION_OPTIONS = [
+    { id: "off", labelKey: "permissionAutomationOff" },
+    { id: "auto-tools", labelKey: "permissionAutomationAutoTools" },
+    { id: "unattended", labelKey: "permissionAutomationUnattended" },
+  ];
 
   let state = null;
   let readers = null;
   let helpers = null;
   let ops = null;
+  const languagePickerApi = root.ClawdLanguagePicker || {};
 
   const LANGUAGE_OPTIONS = ["en", "zh", "zh-TW", "ko", "ja"];
+  const ROAM_MOVEMENT_NATURAL = "natural";
+  const ROAM_MOVEMENT_AXIS = "axis";
 
   function t(key) {
     return helpers.t(key);
+  }
+
+  function readRoamMovementStyle() {
+    return state.snapshot && state.snapshot.roamConstrainAxis === true
+      ? ROAM_MOVEMENT_AXIS
+      : ROAM_MOVEMENT_NATURAL;
+  }
+
+  async function saveRoamMovementStyle(value) {
+    try {
+      const result = await window.settingsAPI.update(
+        "roamConstrainAxis",
+        value === ROAM_MOVEMENT_AXIS,
+      );
+      if (result && result.status === "ok") return true;
+      const message = (result && result.message) || "unknown error";
+      ops.showToast(t("toastSaveFailed") + message, { error: true });
+    } catch (err) {
+      ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+    }
+    return false;
+  }
+
+  function buildRoamMovementStyleRow() {
+    const row = document.createElement("div");
+    row.className = "row roam-movement-style-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("rowRoamMovementStyle");
+    const description = document.createElement("span");
+    description.className = "row-desc";
+    description.textContent = t("rowRoamMovementStyleDesc");
+    text.appendChild(label);
+    text.appendChild(description);
+
+    const controlHost = document.createElement("div");
+    controlHost.className = "row-control";
+    const control = helpers.buildSegmentedRadio({
+      value: readRoamMovementStyle(),
+      disabled: !(state.snapshot && state.snapshot.freeRoam === true),
+      ariaLabel: t("rowRoamMovementStyle"),
+      className: "roam-movement-style-segmented",
+      options: [
+        { value: ROAM_MOVEMENT_NATURAL, label: t("roamMovementNatural") },
+        { value: ROAM_MOVEMENT_AXIS, label: t("roamMovementAxis") },
+      ],
+      onChange: saveRoamMovementStyle,
+    });
+    controlHost.appendChild(control.element);
+    row.appendChild(text);
+    row.appendChild(controlHost);
+    state.mountedControls.roamMovementStyle = control;
+    return row;
+  }
+
+  function buildFreeRoamGroup() {
+    const headerRow = helpers.buildSwitchRow({
+      key: "freeRoam",
+      labelKey: "rowFreeRoam",
+      descKey: "rowFreeRoamDesc",
+    });
+    headerRow.classList.add("free-roam-header-row");
+
+    const headerSwitch = headerRow.querySelector(".switch");
+    if (headerSwitch) headerSwitch.setAttribute("aria-label", t("rowFreeRoam"));
+    const headerAction = headerRow.querySelector(".row-control");
+    if (headerAction) headerAction.remove();
+
+    return helpers.buildCollapsibleGroup({
+      id: "general:free-roam",
+      headerContent: headerRow,
+      headerAction,
+      disclosureLabel: t("rowFreeRoam"),
+      defaultCollapsed: true,
+      className: "free-roam-collapsible",
+      children: [buildOptionList("free-roam-option-list", [
+        buildRoamMovementStyleRow(),
+      ])],
+    });
   }
 
   function render(parent) {
@@ -94,84 +183,34 @@
     parent.appendChild(subtitle);
     parent.appendChild(buildTutorialReplayHint());
 
+    // General tab IA: sections are ordered by how often they're touched, with
+    // the danger section pinned last. Appearance stays first (language sits at
+    // the top of settings by convention); Session ranks high because it's
+    // checked often; Behavior & position and System & startup are set-once, so
+    // they sink toward the bottom.
     parent.appendChild(helpers.buildSection(t("sectionAppearance"), [
       buildLanguageRow(),
       buildSizeSliderRow(),
       buildTextScaleRow(),
-      buildSoundGroup(),
-      buildFlashGroup(),
-      helpers.buildSwitchRow({
-        key: "allowEdgePinning",
-        labelKey: "rowAllowEdgePinning",
-        descKey: "rowAllowEdgePinningDesc",
-      }),
-      helpers.buildSwitchRow({
-        key: "disableMiniMode",
-        labelKey: "rowDisableMiniMode",
-        descKey: "rowDisableMiniModeDesc",
-      }),
-      helpers.buildSwitchRow({
-        key: "freeRoam",
-        labelKey: "rowFreeRoam",
-        descKey: "rowFreeRoamDesc",
-      }),
-      helpers.buildSwitchRow({
-        key: "keepSizeAcrossDisplays",
-        labelKey: "rowKeepSizeAcrossDisplays",
-        descKey: "rowKeepSizeAcrossDisplaysDesc",
-      }),
     ]));
 
     parent.appendChild(helpers.buildSection(t("sectionSession"), [
       buildSessionHudGroup(),
+      buildQuotaRingGroup(),
       buildSessionCleanupGroup(),
       buildDashboardRow(),
     ]));
 
-    // System: global power / system behaviors that aren't per-session and
-    // aren't appearance. Both toggles affect the whole machine's power state
-    // (low-power idle throttling; blocking OS sleep while any task runs).
-    parent.appendChild(helpers.buildSection(t("sectionSystem"), [
+    // Alerts & feedback: every way the pet gets your attention — sound, screen
+    // flash, and the bubble preferences (visibility, auto-close policy, follow).
+    parent.appendChild(helpers.buildSection(t("sectionAlerts"), [
+      buildSoundGroup(),
+      buildFlashGroup(),
       helpers.buildSwitchRow({
-        key: "lowPowerIdleMode",
-        labelKey: "rowLowPowerIdleMode",
-        descKey: "rowLowPowerIdleModeDesc",
+        key: "testReactionsEnabled",
+        labelKey: "rowTestReactions",
+        descKey: "rowTestReactionsDesc",
       }),
-      helpers.buildSwitchRow({
-        key: "keepAwakeWhileWorking",
-        labelKey: "rowKeepAwakeWhileWorking",
-        descKey: "rowKeepAwakeWhileWorkingDesc",
-      }),
-    ]));
-
-    const manageClaudeHooksEnabled = !!(state.snapshot && state.snapshot.manageClaudeHooksAutomatically);
-    parent.appendChild(helpers.buildSection(t("sectionStartup"), [
-      helpers.buildSwitchRow({
-        key: "manageClaudeHooksAutomatically",
-        labelKey: "rowManageClaudeHooks",
-        descKey: "rowManageClaudeHooksDesc",
-        descExtraKey: "rowManageClaudeHooksOffNote",
-        onToggle: ({ nextRaw }) => confirmDisableClaudeHookManagement(nextRaw),
-        actionButton: {
-          labelKey: "actionDisconnectClaudeHooks",
-          invoke: () => runDisconnectClaudeHooks(),
-        },
-      }),
-      helpers.buildSwitchRow({
-        key: "openAtLogin",
-        labelKey: "rowOpenAtLogin",
-        descKey: "rowOpenAtLoginDesc",
-      }),
-      helpers.buildSwitchRow({
-        key: "autoStartWithClaude",
-        labelKey: "rowStartWithClaude",
-        descKey: "rowStartWithClaudeDesc",
-        descExtraKey: manageClaudeHooksEnabled ? null : "rowStartWithClaudeDisabledDesc",
-        disabled: !manageClaudeHooksEnabled,
-      }),
-    ]));
-
-    parent.appendChild(helpers.buildSection(t("sectionBubbles"), [
       helpers.buildSwitchRow({
         key: "hideBubbles",
         labelKey: "rowHideBubbles",
@@ -186,17 +225,60 @@
       }),
     ]));
 
-    // Permissions is its own section (not "Bubbles") because auto-pilot is a
-    // permission-handling behavior, not a bubble-display preference. Kept last
-    // so the danger toggle sits at the bottom, away from everyday settings.
-    parent.appendChild(helpers.buildSection(t("sectionPermissions"), [
+    // Behavior & position: how the pet moves and sits on screen. Rarely changed
+    // after first setup, so it sits below the everyday sections.
+    parent.appendChild(helpers.buildSection(t("sectionBehavior"), [
+      buildFreeRoamGroup(),
       helpers.buildSwitchRow({
-        key: "autoApproveAllPermissions",
-        labelKey: "rowAutoApproveAll",
-        descKey: "rowAutoApproveAllDesc",
-        danger: true,
-        onToggle: ({ nextRaw }) => confirmAutoApproveAll(nextRaw),
+        key: "allowEdgePinning",
+        labelKey: "rowAllowEdgePinning",
+        descKey: "rowAllowEdgePinningDesc",
       }),
+      helpers.buildSwitchRow({
+        key: "disableMiniMode",
+        labelKey: "rowDisableMiniMode",
+        descKey: "rowDisableMiniModeDesc",
+      }),
+      helpers.buildSwitchRow({
+        key: "keepSizeAcrossDisplays",
+        labelKey: "rowKeepSizeAcrossDisplays",
+        descKey: "rowKeepSizeAcrossDisplaysDesc",
+      }),
+      // #562: the fullscreenOverlay switch is intentionally NOT rendered here.
+      // For borderless-fullscreen games (the common case) "off" can't drop the
+      // pet behind the game anyway (a Windows limit), so the toggle was a
+      // non-choice. The pref + #538 stand-down logic stay (default on) as an
+      // escape hatch for exclusive-fullscreen games, whose overlay behavior is
+      // unverified. To restore the toggle: re-add a buildSwitchRow for
+      // "fullscreenOverlay" here AND add its key back into GENERAL_IN_PLACE_KEYS
+      // (dropped so patchInPlace doesn't force a full re-render for a pref that
+      // has no mounted control). The rowFullscreenOverlay[Desc] i18n keys remain.
+    ]));
+
+    // System & startup: machine-level toggles (low-power idle throttling and
+    // blocking OS sleep while working) plus launch-at-login. Set-once, near bottom.
+    parent.appendChild(helpers.buildSection(t("sectionSystemStartup"), [
+      helpers.buildSwitchRow({
+        key: "lowPowerIdleMode",
+        labelKey: "rowLowPowerIdleMode",
+        descKey: "rowLowPowerIdleModeDesc",
+      }),
+      helpers.buildSwitchRow({
+        key: "keepAwakeWhileWorking",
+        labelKey: "rowKeepAwakeWhileWorking",
+        descKey: "rowKeepAwakeWhileWorkingDesc",
+      }),
+      helpers.buildSwitchRow({
+        key: "openAtLogin",
+        labelKey: "rowOpenAtLogin",
+        descKey: "rowOpenAtLoginDesc",
+      }),
+    ]));
+
+    // Permission automation stays last: both automatic modes carry a broad
+    // trust boundary and require an explicit confirmation.
+    parent.appendChild(helpers.buildSection(t("sectionPermissions"), [
+      buildPermissionAutomationRow(),
     ]));
   }
 
@@ -230,48 +312,130 @@
     return wrap;
   }
 
-  // DANGER "auto-pilot": enabling auto-approves every agent permission request
-  // (Bash, file writes, rm — everything) with no prompt. Gate the ENABLE path
-  // behind a destructive confirm; disabling is always safe and immediate.
-  function confirmAutoApproveAll(nextRaw) {
-    // Route through the setAutoApproveAll command (not settings:update, which
-    // now rejects this key). Enabling carries confirmed:true only after the
-    // user accepts the danger modal, so the confirmation is a real gate.
-    if (!nextRaw) return window.settingsAPI.command("setAutoApproveAll", { enabled: false });
-    return showAutoApproveAllConfirmModal().then((actionId) => {
-      if (actionId !== "enable") return { status: "ok", noop: true };
-      return window.settingsAPI.command("setAutoApproveAll", { enabled: true, confirmed: true });
-    });
+  function readPermissionAutomationMode() {
+    const mode = state.snapshot && state.snapshot.permissionAutomationMode;
+    return PERMISSION_AUTOMATION_OPTIONS.some((option) => option.id === mode)
+      ? mode
+      : "off";
   }
 
-  function showAutoApproveAllConfirmModal() {
-    return showSettingsConfirmModal({
-      title: t("autoApproveAllConfirmTitle"),
-      detail: t("autoApproveAllConfirmDetail"),
+  function permissionAutomationWarningKey(mode) {
+    if (mode === "auto-tools") return "permissionAutomationAutoToolsWarningDismissed";
+    if (mode === "unattended") return "permissionAutomationUnattendedWarningDismissed";
+    return null;
+  }
+
+  function isPermissionAutomationWarningDismissed(mode) {
+    const key = permissionAutomationWarningKey(mode);
+    return !!(key && state.snapshot && state.snapshot[key] === true);
+  }
+
+  function showPermissionAutomationConfirmModal(mode) {
+    const unattended = mode === "unattended";
+    return helpers.showSettingsConfirmModal({
+      title: t(unattended
+        ? "permissionAutomationUnattendedConfirmTitle"
+        : "permissionAutomationAutoToolsConfirmTitle"),
+      detail: t(unattended
+        ? "permissionAutomationUnattendedConfirmDetail"
+        : "permissionAutomationAutoToolsConfirmDetail"),
+      checkboxLabel: t(unattended
+        ? "permissionAutomationUnattendedDontShowAgain"
+        : "permissionAutomationAutoToolsDontShowAgain"),
+      checkboxChecked: false,
+      returnDetails: true,
       actions: [
-        { id: "enable", label: t("autoApproveAllConfirmEnable"), tone: "danger" },
-        { id: "cancel", label: t("autoApproveAllConfirmCancel"), tone: "accent", defaultFocus: true },
+        {
+          id: "enable",
+          label: t(unattended
+            ? "permissionAutomationEnableUnattended"
+            : "permissionAutomationEnableAutoTools"),
+          tone: "danger",
+        },
+        { id: "cancel", label: t("permissionAutomationCancel"), tone: "accent", defaultFocus: true },
       ],
     });
   }
 
-  function confirmDisableClaudeHookManagement(nextRaw) {
-    if (nextRaw) return window.settingsAPI.update("manageClaudeHooksAutomatically", true);
-    return showClaudeHooksDisableConfirmModal().then((actionId) => {
-      if (!actionId || actionId === "keep") return { status: "ok", noop: true };
-      if (actionId === "disconnect") return window.settingsAPI.command("uninstallHooks");
-      return window.settingsAPI.update("manageClaudeHooksAutomatically", false);
+  function setPermissionAutomationMode(mode) {
+    if (mode === readPermissionAutomationMode()) return Promise.resolve({ status: "ok", noop: true });
+    if (mode === "off") {
+      return window.settingsAPI.command("setPermissionAutomationMode", {
+        mode,
+        confirmed: false,
+      });
+    }
+    if (isPermissionAutomationWarningDismissed(mode)) {
+      return window.settingsAPI.command("setPermissionAutomationMode", {
+        mode,
+        confirmed: false,
+      });
+    }
+    return showPermissionAutomationConfirmModal(mode).then((result) => {
+      if (!result || result.actionId !== "enable") return { status: "ok", noop: true };
+      return window.settingsAPI.command("setPermissionAutomationMode", {
+        mode,
+        confirmed: true,
+        suppressFutureConfirmation: result.checkboxChecked === true,
+      });
     });
   }
 
-  function runDisconnectClaudeHooks() {
-    if (!window.settingsAPI || typeof window.settingsAPI.command !== "function") {
-      return Promise.resolve({ status: "error", message: "settings API unavailable" });
+  function buildPermissionAutomationRow() {
+    const row = document.createElement("div");
+    row.className = "row permission-automation-row";
+
+    const text = document.createElement("div");
+    text.className = "row-text";
+    const label = document.createElement("span");
+    label.className = "row-label";
+    label.textContent = t("rowPermissionAutomation");
+    const desc = document.createElement("span");
+    desc.className = "row-desc";
+    const current = readPermissionAutomationMode();
+    const descKey = current === "auto-tools"
+      ? "permissionAutomationAutoToolsDesc"
+      : (current === "unattended"
+        ? "permissionAutomationUnattendedDesc"
+        : "permissionAutomationOffDesc");
+    desc.textContent = t(descKey);
+    text.appendChild(label);
+    text.appendChild(desc);
+    row.appendChild(text);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-control";
+    const segmented = document.createElement("div");
+    segmented.className = "segmented permission-automation-segmented";
+    segmented.setAttribute("role", "group");
+    segmented.setAttribute("aria-label", t("rowPermissionAutomation"));
+    for (const option of PERMISSION_AUTOMATION_OPTIONS) {
+      const btn = document.createElement("button");
+      const selected = current === option.id;
+      btn.type = "button";
+      btn.dataset.mode = option.id;
+      btn.textContent = t(option.labelKey);
+      btn.classList.toggle("active", selected);
+      btn.setAttribute("aria-pressed", selected ? "true" : "false");
+      btn.addEventListener("click", () => {
+        if (btn.classList.contains("active") || btn.disabled) return;
+        for (const candidate of segmented.querySelectorAll("button")) candidate.disabled = true;
+        setPermissionAutomationMode(option.id).then((result) => {
+          if (!result || result.status !== "ok") {
+            const msg = (result && result.message) || "unknown error";
+            ops.showToast(t("toastSaveFailed") + msg, { error: true });
+          }
+        }).catch((err) => {
+          ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+        }).finally(() => {
+          for (const candidate of segmented.querySelectorAll("button")) candidate.disabled = false;
+        });
+      });
+      segmented.appendChild(btn);
     }
-    return showClaudeHooksDisconnectConfirmModal().then((actionId) => {
-      if (actionId !== "disconnect") return { status: "ok", noop: true };
-      return window.settingsAPI.command("uninstallHooks");
-    });
+    ctrl.appendChild(segmented);
+    row.appendChild(ctrl);
+    return row;
   }
 
   function buildDashboardRow() {
@@ -314,141 +478,44 @@
         `<span class="row-desc"></span>` +
       `</div>` +
       `<div class="row-control">` +
-        `<div class="language-picker">` +
-          `<button type="button" class="language-picker-trigger" aria-haspopup="listbox" aria-expanded="false">` +
-            `<span class="language-picker-value"></span>` +
-            `<span class="language-picker-chevron" aria-hidden="true"></span>` +
-          `</button>` +
-          `<div class="language-picker-menu" role="listbox" aria-hidden="true"></div>` +
-        `</div>` +
       `</div>`;
     row.querySelector(".row-label").textContent = t("rowLanguage");
     row.querySelector(".row-desc").textContent = t("rowLanguageDesc");
-    const picker = row.querySelector(".language-picker");
-    const trigger = row.querySelector(".language-picker-trigger");
-    const valueEl = row.querySelector(".language-picker-value");
-    const menu = row.querySelector(".language-picker-menu");
-    trigger.setAttribute("aria-label", t("rowLanguage"));
     const currentLang = readers.getLang();
-    let activeLang = currentLang;
     const getLabel = (lang) => t(LANGUAGE_LABEL_KEYS[lang] || "langEnglish");
-    const options = [];
-    for (const lang of LANGUAGE_OPTIONS) {
-      const option = document.createElement("button");
-      option.type = "button";
-      option.className = "language-picker-option";
-      option.setAttribute("role", "option");
-      option.setAttribute("data-lang", lang);
-      option.setAttribute("aria-selected", lang === currentLang ? "true" : "false");
-      option.textContent = getLabel(lang);
-      menu.appendChild(option);
-      options.push(option);
+    if (typeof languagePickerApi.createLanguagePicker !== "function") {
+      throw new Error("language-picker.js failed to load before settings-tab-general.js");
     }
-    function getOption(lang) {
-      return options.find((option) => option.dataset.lang === lang) || options[0] || null;
-    }
-    function syncDisplay(lang) {
-      const selectedLang = LANGUAGE_OPTIONS.includes(lang) ? lang : LANGUAGE_OPTIONS[0];
-      activeLang = selectedLang;
-      valueEl.textContent = getLabel(selectedLang);
-      const open = picker.classList.contains("open");
-      for (const option of options) {
-        const selected = option.dataset.lang === selectedLang;
-        option.classList.toggle("selected", selected);
-        option.setAttribute("aria-selected", selected ? "true" : "false");
-        option.tabIndex = open && selected ? 0 : -1;
-      }
-    }
-    function setOpen(open) {
-      picker.classList.toggle("open", open);
-      trigger.setAttribute("aria-expanded", open ? "true" : "false");
-      menu.setAttribute("aria-hidden", open ? "false" : "true");
-      syncDisplay(activeLang);
-      if (!open) return;
-      const option = getOption(activeLang);
-      if (option && typeof option.focus === "function") option.focus();
-    }
-    function chooseLanguage(next) {
-      if (next === activeLang) {
-        setOpen(false);
-        return;
-      }
-      if (next === readers.getLang()) {
-        syncDisplay(next);
-        setOpen(false);
-        return;
-      }
-      syncDisplay(next);
-      setOpen(false);
-      const revertIfStillPending = () => {
-        if (activeLang === next) syncDisplay(readers.getLang());
-      };
-      window.settingsAPI.update("lang", next).then((result) => {
-        if (!result || result.status !== "ok") {
-          const msg = (result && result.message) || "unknown error";
-          ops.showToast(t("toastSaveFailed") + msg, { error: true });
-          revertIfStillPending();
+    const pickerControl = languagePickerApi.createLanguagePicker({
+      value: currentLang,
+      options: LANGUAGE_OPTIONS.map((lang) => ({ value: lang, label: getLabel(lang) })),
+      ariaLabel: t("rowLanguage"),
+      onChange: (next) => {
+        // Selecting the already committed language only closes the menu. This
+        // also avoids sending a duplicate update while an earlier save settles.
+        if (next === readers.getLang()) return true;
+        let updatePromise;
+        try {
+          updatePromise = window.settingsAPI.update("lang", next);
+        } catch (err) {
+          ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+          return false;
         }
-      }).catch((err) => {
-        ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
-        revertIfStillPending();
-      });
-    }
-    trigger.addEventListener("click", () => {
-      setOpen(!picker.classList.contains("open"));
-    });
-    trigger.addEventListener("keydown", (event) => {
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        event.preventDefault();
-        setOpen(true);
-      }
-    });
-    for (const option of options) {
-      option.addEventListener("click", () => chooseLanguage(option.dataset.lang));
-      option.addEventListener("keydown", (event) => {
-        const index = options.indexOf(option);
-        if (event.key === "Escape") {
-          event.preventDefault();
-          setOpen(false);
-          if (typeof trigger.focus === "function") trigger.focus();
-          return;
-        }
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          chooseLanguage(option.dataset.lang);
-          return;
-        }
-        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-          event.preventDefault();
-          const delta = event.key === "ArrowDown" ? 1 : -1;
-          const nextOption = options[(index + delta + options.length) % options.length];
-          if (nextOption && typeof nextOption.focus === "function") nextOption.focus();
-        }
-      });
-    }
-    const closeOnOutsideClick = (event) => {
-      if (!picker.classList.contains("open")) return;
-      if (picker.contains(event.target)) return;
-      setOpen(false);
-    };
-    const closeOnEscape = (event) => {
-      if (event.key !== "Escape" || !picker.classList.contains("open")) return;
-      event.preventDefault();
-      setOpen(false);
-    };
-    if (document && typeof document.addEventListener === "function") {
-      document.addEventListener("click", closeOnOutsideClick);
-      document.addEventListener("keydown", closeOnEscape);
-      state.mountedControls.languagePicker = {
-        dispose: () => {
-          if (typeof document.removeEventListener === "function") {
-            document.removeEventListener("click", closeOnOutsideClick);
-            document.removeEventListener("keydown", closeOnEscape);
+        return Promise.resolve(updatePromise).then((result) => {
+          if (!result || result.status !== "ok") {
+            const msg = (result && result.message) || "unknown error";
+            ops.showToast(t("toastSaveFailed") + msg, { error: true });
+            return false;
           }
-        },
-      };
-    }
-    syncDisplay(currentLang);
+          return true;
+        }).catch((err) => {
+          ops.showToast(t("toastSaveFailed") + (err && err.message), { error: true });
+          return false;
+        });
+      },
+    });
+    row.querySelector(".row-control").appendChild(pickerControl.element);
+    state.mountedControls.languagePicker = pickerControl;
     return row;
   }
 
@@ -465,6 +532,63 @@
       className: "session-hud-collapsible",
       children: [buildSessionHudOptionsList(sessionHudControlsEnabled)],
     });
+  }
+
+  // The quota ring is a sibling of the Session HUD under "Session management",
+  // not a child of it: its switches are never gated by the HUD master, so the
+  // ring can be used with the Session HUD turned off (and vice versa).
+  function buildQuotaRingGroup() {
+    const enabledRow = helpers.buildSwitchRow({
+      key: "sessionHudShowQuota",
+      labelKey: "rowQuotaRingEnabled",
+      descKey: "rowQuotaRingEnabledDesc",
+    });
+    const mergeRow = helpers.buildSwitchRow({
+      key: "quotaMergeSources",
+      labelKey: "rowQuotaMergeSources",
+      descKey: "rowQuotaMergeSourcesDesc",
+    });
+    const claudeCollectionRow = helpers.buildSwitchRow({
+      key: "claudeQuotaCollectionEnabled",
+      labelKey: "rowClaudeQuotaCollection",
+      descKey: "rowClaudeQuotaCollectionDesc",
+    });
+    // "Merge across machines" only matters with more than one reporting source
+    // (WSL / SSH remotes). Hidden by default so single-machine users never see
+    // a confusing no-op switch; revealed once multiple sources are confirmed.
+    mergeRow.style.display = state.snapshot && state.snapshot.quotaMergeSources === true
+      ? ""
+      : "none";
+    const optionList = buildOptionList("quota-ring-option-list", [
+      enabledRow,
+      claudeCollectionRow,
+      mergeRow,
+    ]);
+    const group = helpers.buildCollapsibleGroup({
+      id: "general:quota-ring",
+      title: t("rowQuotaRingGroup"),
+      desc: t("rowQuotaRingGroupDesc"),
+      defaultCollapsed: true,
+      className: "quota-ring-collapsible",
+      animateExpansion: false,
+      children: [optionList],
+    });
+    if (window.settingsAPI && typeof window.settingsAPI.getQuotaSourceCount === "function") {
+      Promise.resolve(window.settingsAPI.getQuotaSourceCount())
+        .then((count) => {
+          if (Number(count) <= 1) return;
+          const revealMergeRow = () => {
+            mergeRow.style.display = "";
+          };
+          if (typeof group.mutateCollapsibleBody === "function") {
+            group.mutateCollapsibleBody(revealMergeRow);
+          } else {
+            revealMergeRow();
+          }
+        })
+        .catch(() => {});
+    }
+    return group;
   }
 
   function buildOptionList(className, rows) {
@@ -669,6 +793,7 @@
       desc: t("rowFlashDesc"),
       defaultCollapsed: true,
       className: "flash-collapsible",
+      animateExpansion: false,
       children: [buildOptionList("flash-option-list", [
         helpers.buildSwitchRow({
           key: "flashTaskbarOnComplete",
@@ -1152,106 +1277,13 @@
   }
 
   function confirmDisableUpdateBubbles() {
-    return showSettingsConfirmModal({
+    return helpers.showSettingsConfirmModal({
       title: t("updateBubbleDisableConfirmTitle"),
       detail: t("updateBubbleDisableConfirmDetail"),
       actions: [
         { id: "confirm", label: t("updateBubbleDisableConfirmAction"), tone: "danger" },
         { id: "cancel", label: t("updateBubbleDisableConfirmCancel"), tone: "accent", defaultFocus: true },
       ],
-    });
-  }
-
-  function showClaudeHooksDisableConfirmModal() {
-    return showSettingsConfirmModal({
-      title: t("claudeHooksDisableConfirmTitle"),
-      detail: t("claudeHooksDisableConfirmDetail"),
-      actions: [
-        { id: "disconnect", label: t("claudeHooksDisableConfirmDisconnect"), tone: "danger" },
-        { id: "disable", label: t("claudeHooksDisableConfirmDisableOnly"), tone: "neutral" },
-        { id: "keep", label: t("claudeHooksDisableConfirmKeep"), tone: "accent", defaultFocus: true },
-      ],
-    });
-  }
-
-  function showClaudeHooksDisconnectConfirmModal() {
-    return showSettingsConfirmModal({
-      title: t("claudeHooksDisconnectConfirmTitle"),
-      detail: t("claudeHooksDisconnectConfirmDetail"),
-      actions: [
-        { id: "disconnect", label: t("claudeHooksDisconnectConfirmAction"), tone: "danger" },
-        { id: "keep", label: t("claudeHooksDisconnectConfirmKeep"), tone: "accent", defaultFocus: true },
-      ],
-    });
-  }
-
-  function showSettingsConfirmModal({ title, detail, actions }) {
-    const rootNode = document.getElementById("modalRoot");
-    if (!rootNode) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      let settled = false;
-      const overlay = document.createElement("div");
-      overlay.className = "modal-backdrop settings-confirm-backdrop";
-
-      const modal = document.createElement("div");
-      modal.className = "settings-confirm-modal";
-      modal.setAttribute("role", "dialog");
-      modal.setAttribute("aria-modal", "true");
-
-      const icon = document.createElement("div");
-      icon.className = "settings-confirm-icon";
-      icon.textContent = "!";
-
-      const titleNode = document.createElement("h2");
-      titleNode.textContent = title;
-
-      const detailNode = document.createElement("p");
-      detailNode.textContent = detail;
-
-      const actionsNode = document.createElement("div");
-      actionsNode.className = "settings-confirm-actions";
-
-      function close(actionId) {
-        if (settled) return;
-        settled = true;
-        document.removeEventListener("keydown", onKeyDown, true);
-        rootNode.innerHTML = "";
-        resolve(actionId);
-      }
-
-      function onKeyDown(ev) {
-        if (ev.key === "Escape") close(null);
-      }
-
-      overlay.addEventListener("click", (ev) => {
-        if (ev.target === overlay) close(null);
-      });
-      const buttons = (Array.isArray(actions) ? actions : []).map((action) => {
-        const button = document.createElement("button");
-        const tone = action && typeof action.tone === "string" ? action.tone : "neutral";
-        const toneClass = tone === "accent"
-          ? "accent"
-          : (tone === "danger" ? "settings-confirm-danger" : "");
-        button.type = "button";
-        button.className = `soft-btn${toneClass ? ` ${toneClass}` : ""}`;
-        button.textContent = action && action.label ? action.label : "";
-        button.addEventListener("click", () => close(action && action.id ? action.id : null));
-        actionsNode.appendChild(button);
-        return { action, button };
-      });
-      document.addEventListener("keydown", onKeyDown, true);
-      modal.appendChild(icon);
-      modal.appendChild(titleNode);
-      modal.appendChild(detailNode);
-      modal.appendChild(actionsNode);
-      overlay.appendChild(modal);
-      rootNode.innerHTML = "";
-      rootNode.appendChild(overlay);
-      const focusTarget =
-        buttons.find((action) => action.action && action.action.defaultFocus)
-        || buttons[buttons.length - 1]
-        || null;
-      if (focusTarget) focusTarget.button.focus();
     });
   }
 
@@ -1772,25 +1804,6 @@
     return true;
   }
 
-  function setGeneralSwitchExtraDesc(key, descExtraKey) {
-    const meta = getMountedGeneralSwitch(key);
-    if (!meta || !meta.text) return false;
-    if (descExtraKey) {
-      if (!meta.extraElement) {
-        meta.extraElement = document.createElement("span");
-        meta.extraElement.className = "row-desc row-desc-extra";
-        meta.text.appendChild(meta.extraElement);
-      }
-      meta.extraElement.textContent = t(descExtraKey);
-      return true;
-    }
-    if (meta.extraElement) {
-      meta.extraElement.remove();
-      meta.extraElement = null;
-    }
-    return true;
-  }
-
   function syncSessionHudChildSwitchesDisabled() {
     const disabled = !(state.snapshot && state.snapshot.sessionHudEnabled);
     for (const key of SESSION_HUD_CHILD_SWITCH_KEYS) {
@@ -1799,15 +1812,18 @@
     return true;
   }
 
-  function syncClaudeHookManagementChildSwitchesDisabled() {
-    const disabled = !(state.snapshot && state.snapshot.manageClaudeHooksAutomatically);
-    for (const key of CLAUDE_HOOK_MANAGEMENT_CHILD_SWITCH_KEYS) {
-      if (!setGeneralSwitchDisabled(key, disabled)) return false;
-    }
-    return setGeneralSwitchExtraDesc(
-      "autoStartWithClaude",
-      disabled ? "rowStartWithClaudeDisabledDesc" : null
-    );
+  function getMountedRoamMovementStyle() {
+    const control = state.mountedControls.roamMovementStyle;
+    if (!control || !document.body.contains(control.element)) return null;
+    return control;
+  }
+
+  function syncRoamMovementStyleFromSnapshot() {
+    const control = getMountedRoamMovementStyle();
+    if (!control) return false;
+    control.setValue(readRoamMovementStyle());
+    control.setDisabled(!(state.snapshot && state.snapshot.freeRoam === true));
+    return true;
   }
 
   function hasMountedBubblePolicyControls() {
@@ -1848,8 +1864,8 @@
       && !SESSION_HUD_CHILD_SWITCH_KEYS.every((key) => getMountedGeneralSwitch(key))) {
       return false;
     }
-    if (keys.includes("manageClaudeHooksAutomatically")
-      && !CLAUDE_HOOK_MANAGEMENT_CHILD_SWITCH_KEYS.every((key) => getMountedGeneralSwitch(key))) {
+    if ((keys.includes("freeRoam") || keys.includes("roamConstrainAxis"))
+      && !getMountedRoamMovementStyle()) {
       return false;
     }
     if ((keys.includes("hideBubbles") || keys.some((key) => BUBBLE_POLICY_KEYS.has(key)))
@@ -1879,6 +1895,7 @@
       }
       if (SESSION_CLEANUP_NUMBER_KEYS.has(key)) continue;
       if (FLASH_NUMBER_KEYS.has(key)) continue;
+      if (key === "roamConstrainAxis") continue;
       const meta = state.mountedControls.generalSwitches.get(key);
       if (!meta || !document.body.contains(meta.element)) return false;
     }
@@ -1904,6 +1921,7 @@
         state.mountedControls.sessionCleanupControls.get(key).syncFromSnapshot();
         continue;
       }
+      if (key === "roamConstrainAxis") continue;
       const meta = state.mountedControls.generalSwitches.get(key);
       state.transientUiState.generalSwitches.delete(key);
       helpers.setSwitchVisual(meta.element, readers.readGeneralSwitchVisual(key, meta.invert), { pending: false });
@@ -1911,13 +1929,13 @@
         state.mountedControls.soundVolume.syncDisabled();
       }
     }
+    if ((keys.includes("freeRoam") || keys.includes("roamConstrainAxis"))
+      && !syncRoamMovementStyleFromSnapshot()) return false;
     if (keys.includes("sessionHudEnabled") && !syncSessionHudChildSwitchesDisabled()) return false;
     if (keys.some((key) => SESSION_HUD_SUMMARY_KEYS.has(key))) {
       const summary = state.mountedControls.sessionHudSummary;
       if (summary && document.body.contains(summary.element)) summary.syncFromSnapshot();
     }
-    if (keys.includes("manageClaudeHooksAutomatically")
-      && !syncClaudeHookManagementChildSwitchesDisabled()) return false;
     if ((keys.includes("hideBubbles") || keys.some((key) => BUBBLE_POLICY_KEYS.has(key)))
       && !syncBubblePolicyControlsFromSnapshot()) return false;
     if ((keys.includes("soundVolume") || keys.includes("soundMuted"))

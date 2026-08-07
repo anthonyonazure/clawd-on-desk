@@ -16,8 +16,13 @@ function registerPetInteractionIpc(options = {}) {
   const getCurrentState = requiredDependency(options.getCurrentState, "getCurrentState");
   const getCurrentSvg = requiredDependency(options.getCurrentSvg, "getCurrentSvg");
   const sendToRenderer = requiredDependency(options.sendToRenderer, "sendToRenderer");
+  const recoverVisiblePetAfterRendererLoad = requiredDependency(
+    options.recoverVisiblePetAfterRendererLoad,
+    "recoverVisiblePetAfterRendererLoad"
+  );
   const setDragLocked = requiredDependency(options.setDragLocked, "setDragLocked");
   const setMouseOverPet = requiredDependency(options.setMouseOverPet, "setMouseOverPet");
+  const cancelRoam = requiredDependency(options.cancelRoam, "cancelRoam");
   const beginDragSnapshot = requiredDependency(options.beginDragSnapshot, "beginDragSnapshot");
   const clearDragSnapshot = requiredDependency(options.clearDragSnapshot, "clearDragSnapshot");
   const syncHitWin = requiredDependency(options.syncHitWin, "syncHitWin");
@@ -25,11 +30,10 @@ function registerPetInteractionIpc(options = {}) {
   const checkMiniModeSnap = requiredDependency(options.checkMiniModeSnap, "checkMiniModeSnap");
   const hasPetWindow = requiredDependency(options.hasPetWindow, "hasPetWindow");
   const getPetWindowBounds = requiredDependency(options.getPetWindowBounds, "getPetWindowBounds");
-  const getKeepSizeAcrossDisplays = requiredDependency(
-    options.getKeepSizeAcrossDisplays,
-    "getKeepSizeAcrossDisplays"
-  );
   const getCurrentPixelSize = requiredDependency(options.getCurrentPixelSize, "getCurrentPixelSize");
+  // #408: prefer the effective (frozen, when keepSizeAcrossDisplays) size over
+  // re-reading live bounds; falls back to proportional when not provided.
+  const getEffectiveCurrentPixelSize = options.getEffectiveCurrentPixelSize || getCurrentPixelSize;
   const computeDragEndBounds = requiredDependency(options.computeDragEndBounds, "computeDragEndBounds");
   const applyPetWindowBounds = requiredDependency(options.applyPetWindowBounds, "applyPetWindowBounds");
   const flushRuntimeStateToPrefs = requiredDependency(
@@ -56,6 +60,10 @@ function registerPetInteractionIpc(options = {}) {
     options.setLowPowerIdlePaused,
     "setLowPowerIdlePaused"
   );
+  // #640: the editing-overlap dodge defers its hit-window click-through write
+  // while a drag is in flight; drag-lock release must re-run the sync so the
+  // state the drag ended in (overlapping or not) gets applied.
+  const syncImeEditingPetDodge = options.syncImeEditingPetDodge || (() => {});
   const statPath = requiredDependency(options.statPath, "statPath");
   const openTerminalAt = requiredDependency(options.openTerminalAt, "openTerminalAt");
   const dropLog = options.dropLog || (() => {});
@@ -71,6 +79,7 @@ function registerPetInteractionIpc(options = {}) {
 
   on("show-context-menu", showContextMenu);
   on("drag-move", () => moveWindowForDrag());
+  on("pet-visual-ready", (event) => recoverVisiblePetAfterRendererLoad(event));
 
   on("pause-cursor-polling", () => {
     setIdlePaused(true);
@@ -88,10 +97,12 @@ function registerPetInteractionIpc(options = {}) {
     setDragLocked(!!locked);
     if (locked) {
       setMouseOverPet(true);
+      cancelRoam();
       beginDragSnapshot();
     } else {
       clearDragSnapshot();
       syncHitWin();
+      syncImeEditingPetDodge();
     }
   });
 
@@ -110,9 +121,7 @@ function registerPetInteractionIpc(options = {}) {
         if (isMiniMode() || isMiniTransitioning()) return;
         if (hasPetWindow()) {
           const virtualBounds = getPetWindowBounds();
-          const size = getKeepSizeAcrossDisplays()
-            ? { width: virtualBounds.width, height: virtualBounds.height }
-            : getCurrentPixelSize();
+          const size = getEffectiveCurrentPixelSize();
           const clamped = computeDragEndBounds(virtualBounds, size);
           if (clamped) {
             applyPetWindowBounds(clamped);
@@ -127,6 +136,11 @@ function registerPetInteractionIpc(options = {}) {
     } finally {
       setDragLocked(false);
       clearDragSnapshot();
+      // Normally the preceding drag-lock(false) already re-ran the dodge, but
+      // this handler also releases the lock defensively — mirror the re-run so
+      // a drag-end without a paired drag-lock(false) can't strand the deferred
+      // click-through write.
+      syncImeEditingPetDodge();
     }
   });
 

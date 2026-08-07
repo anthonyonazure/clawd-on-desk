@@ -24,12 +24,11 @@ const SIDEBAR_TAB_IDS = [
   "general",
   "agents",
   "theme",
-  "animMap",
   "animOverrides",
   "shortcuts",
   "telegram-approval",
+  "discord-presence",
   "remote-ssh",
-  "mobile",
   "about",
 ];
 

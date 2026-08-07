@@ -19,12 +19,13 @@ class FakeBrowserWindow {
     this.visible = false;
     this.bounds = null;
     this.listeners = new Map();
+    this.sent = [];
     this.webContents = {
       _loading: false,
       isDestroyed: () => false,
       isLoading: () => false,
       once: () => {},
-      send: () => {},
+      send: (channel, payload) => this.sent.push({ channel, payload }),
     };
     FakeBrowserWindow.instances.push(this);
   }
@@ -61,6 +62,8 @@ function loadUpdateBubbleWithElectron(fakeElectron) {
 function createHarness() {
   FakeBrowserWindow.instances = [];
   let updateAutoCloseMs = 9_000;
+  const orbitRepositions = [];
+  const clipboardWrites = [];
   const initUpdateBubble = loadUpdateBubbleWithElectron({ BrowserWindow: FakeBrowserWindow });
   const api = initUpdateBubble({
     win: { isDestroyed: () => false },
@@ -78,9 +81,15 @@ function createHarness() {
     getHudReservedOffset: () => 0,
     guardAlwaysOnTop: () => {},
     reapplyMacVisibility: () => {},
+    repositionSessionHud: () => orbitRepositions.push("reposition"),
+    clipboard: {
+      writeText(value) { clipboardWrites.push(value); },
+    },
   });
   return {
     api,
+    orbitRepositions,
+    clipboardWrites,
     setUpdateAutoCloseMs(value) {
       updateAutoCloseMs = value;
     },
@@ -143,5 +152,57 @@ describe("update bubble auto-close refresh", () => {
 
     mock.timers.tick(250);
     assert.strictEqual(bubble.isVisible(), false);
+  });
+
+  it("repositions Orbit when the update bubble shows, resizes, and finishes hiding", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const harness = createHarness();
+
+    await harness.api.showUpdateBubble({
+      mode: "up-to-date",
+      title: "Up to date",
+      requireAction: false,
+      defaultAction: "dismiss",
+    });
+    const bubble = harness.api.getBubbleWindow();
+    assert.strictEqual(harness.orbitRepositions.length, 1, "show should add update bounds to Orbit avoidance");
+
+    harness.api.handleUpdateBubbleHeight({ sender: bubble.webContents }, 220);
+    assert.strictEqual(harness.orbitRepositions.length, 2, "measured height should reflow Orbit");
+
+    harness.api.hideUpdateBubble();
+    assert.strictEqual(harness.orbitRepositions.length, 2, "Orbit must keep avoiding the fade-out window");
+    mock.timers.tick(250);
+    assert.strictEqual(harness.orbitRepositions.length, 3, "hidden window should release Orbit avoidance");
+  });
+
+  it("copies error details without closing or resolving the update bubble", async () => {
+    const harness = createHarness();
+    const pending = harness.api.showUpdateBubble({
+      mode: "error",
+      title: "Update failed",
+      message: "Network unavailable",
+      copyText: "NETWORK_OFFLINE\nredacted detail",
+      copyFeedback: { copied: "Copied", failed: "Copy failed" },
+      requireAction: true,
+      defaultAction: "dismiss",
+    });
+    const bubble = harness.api.getBubbleWindow();
+    let settled = false;
+    pending.then(() => { settled = true; });
+
+    harness.api.handleUpdateBubbleAction({ sender: bubble.webContents }, "copy-error");
+    await Promise.resolve();
+
+    assert.deepStrictEqual(harness.clipboardWrites, ["NETWORK_OFFLINE\nredacted detail"]);
+    assert.equal(settled, false);
+    assert.equal(bubble.isVisible(), true);
+    assert.deepStrictEqual(bubble.sent.at(-1), {
+      channel: "update-bubble-copy-result",
+      payload: { status: "ok", label: "Copied" },
+    });
+
+    harness.api.handleUpdateBubbleAction({ sender: bubble.webContents }, "dismiss");
+    assert.deepStrictEqual(await pending, { action: "dismiss", source: "user" });
   });
 });

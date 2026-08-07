@@ -2,8 +2,8 @@
 // Clawd — Cursor Agent hook (stdin JSON, hook_event_name; stdout JSON for gating hooks)
 // Registered in ~/.cursor/hooks.json by hooks/cursor-install.js
 
-const { postStateToRunningServer, readHostPrefix } = require("./server-config");
-const { createPidResolver, readStdinJson, getPlatformConfig } = require("./shared-process");
+const { postStateToRunningServer, readHostPrefix, applyWslSourceFields } = require("./server-config");
+const { createPidResolver, readStdinJson, getPlatformConfig, applyOrcaPaneKey } = require("./shared-process");
 
 const HOOK_TO_STATE = {
   sessionStart: { state: "idle", event: "SessionStart" },
@@ -16,6 +16,15 @@ const HOOK_TO_STATE = {
   subagentStop: { state: "working", event: "SubagentStop" },
   preCompact: { state: "sweeping", event: "PreCompact" },
   afterAgentThought: { state: "thinking", event: "AfterAgentThought" },
+};
+
+// #634: lifecycle for the shared resolver's cross-process pid cache. Raw
+// Cursor hook names (pre-mapping). sessionEnd drops the cache; everything
+// unlisted is "event" (cache hit = zero snapshot spawns).
+const EVENT_TO_LIFECYCLE = {
+  sessionStart: "start",
+  beforeSubmitPrompt: "prompt",
+  sessionEnd: "end",
 };
 
 const config = getPlatformConfig({ extraTerminals: { win: ["cursor.exe"] } });
@@ -101,7 +110,13 @@ readStdinJson()
       cwd = payload.workspace_roots[0];
     }
 
-    const { stablePid, agentPid, detectedEditor, pidChain, tmuxSocket, tmuxClient } = resolve();
+    const { stablePid, agentPid, detectedEditor, pidChain, tmuxSocket, tmuxClient } = resolve({
+      namespace: "cursor-agent",
+      sessionId,
+      cacheCwd: cwd,
+      lifecycle: EVENT_TO_LIFECYCLE[hookNameResolved] || "event",
+      cacheable: sessionId !== "default" && !!cwd,
+    });
 
     const body = { state, session_id: sessionId, event };
     body.agent_id = "cursor-agent";
@@ -110,7 +125,10 @@ readStdinJson()
     if (cwd) body.cwd = cwd;
     if (process.env.CLAWD_REMOTE) {
       body.host = readHostPrefix();
+      applyWslSourceFields(body, { remote: true });
+      applyOrcaPaneKey(body);
     } else {
+      applyWslSourceFields(body);
       body.source_pid = stablePid;
       body.editor = detectedEditor || "cursor";
       if (agentPid) {
@@ -120,6 +138,7 @@ readStdinJson()
       if (pidChain.length) body.pid_chain = pidChain;
       if (tmuxSocket) body.tmux_socket = tmuxSocket;
       if (tmuxClient) body.tmux_client = tmuxClient;
+      applyOrcaPaneKey(body);
     }
 
     // Answer Cursor immediately so it never sees empty/malformed stdout, but

@@ -27,6 +27,9 @@
   --sug-hover-border: #d1d5db;
   --sug-hover-color: #374151;
   --sug-arrow: #9ca3af;
+  --irreversible-color: #8a5a00;
+  --irreversible-bg: rgba(255, 176, 32, 0.14);
+  --irreversible-border: rgba(255, 176, 32, 0.45);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -54,6 +57,9 @@
     --sug-hover-border: rgba(255, 255, 255, 0.15);
     --sug-hover-color: #e4e4e7;
     --sug-arrow: #d4d4d8;
+    --irreversible-color: #ffca5f;
+    --irreversible-bg: rgba(255, 176, 32, 0.16);
+    --irreversible-border: rgba(255, 176, 32, 0.5);
   }
 }
 
@@ -110,6 +116,18 @@ body { padding: 6px; }
   color: var(--header-color);
   letter-spacing: 0.02em;
   white-space: nowrap;
+}
+
+/* ── Irreversible-action hint (display-only badge) ── */
+.irreversible-badge {
+  margin: 2px 12px 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--irreversible-color);
+  background: var(--irreversible-bg);
+  border: 1px solid var(--irreversible-border);
 }
 
 /* ── Tool pill ── */
@@ -319,6 +337,13 @@ body { padding: 6px; }
   }
 }
 
+/* Codex request_user_input preview — the options are a read-only echo of
+   what's on screen in Codex's own terminal, not a picker. Override the base
+   .option-item's pointer cursor so it doesn't look clickable. */
+.option-item-readonly {
+  cursor: default;
+}
+
 .option-item input {
   margin-top: 2px;
   accent-color: #d97757;
@@ -456,6 +481,13 @@ body { padding: 6px; }
 
 .btn-suggestion:active:not(:disabled) { transform: scale(0.98); }
 .btn-suggestion:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.session-trust-error {
+  color: var(--deny-color);
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 2px 4px;
+}
 
 /* ── Plan feedback form ── */
 .plan-feedback-form {

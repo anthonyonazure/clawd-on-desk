@@ -48,11 +48,13 @@ function createHarness(options = {}) {
     sendToRenderer: (...args) => calls.push(["sendToRenderer", ...args]),
     sendDashboardI18n: () => calls.push(["sendDashboardI18n"]),
     sendSessionHudI18n: () => calls.push(["sendSessionHudI18n"]),
+    syncWindowTitles: () => calls.push(["syncWindowTitles"]),
     emitSessionSnapshot: (...args) => calls.push(["emitSessionSnapshot", ...args]),
     cleanStaleSessions: () => calls.push(["cleanStaleSessions"]),
     syncPermissionShortcuts: () => calls.push(["syncPermissionShortcuts"]),
     dismissInteractivePermissionBubbles: () => calls.push(["dismissInteractivePermissionBubbles"]),
     clearCodexNotifyBubbles: (...args) => calls.push(["clearCodexNotifyBubbles", ...args]),
+    clearCodexUserInputBubbles: (...args) => calls.push(["clearCodexUserInputBubbles", ...args]),
     clearKimiNotifyBubbles: (...args) => calls.push(["clearKimiNotifyBubbles", ...args]),
     refreshPassiveNotifyAutoClose: () => calls.push(["refreshPassiveNotifyAutoClose"]),
     hideUpdateBubbleForPolicy: () => calls.push(["hideUpdateBubbleForPolicy"]),
@@ -120,6 +122,7 @@ describe("settings-effect-router", () => {
       ["syncPermissionShortcuts"],
       ["dismissInteractivePermissionBubbles"],
       ["clearCodexNotifyBubbles", undefined, "settings-policy-disabled"],
+      ["clearCodexUserInputBubbles", undefined, undefined, "settings-policy-disabled"],
       ["clearKimiNotifyBubbles", undefined, "settings-policy-disabled"],
       ["hideUpdateBubbleForPolicy"],
       ["rebuildAllMenus"],
@@ -138,6 +141,32 @@ describe("settings-effect-router", () => {
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { updateBubbleAutoCloseSeconds: 8 }],
       ["refreshUpdateBubbleAutoClose"],
+      ["rebuildAllMenus"],
+    ]);
+  });
+
+  it("clears the Codex user-input card on the notification-policy axis, not the permission-policy axis", () => {
+    const { calls, emit } = createHarness();
+
+    // A Codex request_user_input card is a passive notification, not a
+    // permission request — disabling permission bubbles alone must not
+    // touch it (it has no Allow/Deny decision to withhold).
+    emit({ permissionBubblesEnabled: false });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { permissionBubblesEnabled: false }],
+      ["syncPermissionShortcuts"],
+      ["dismissInteractivePermissionBubbles"],
+      ["rebuildAllMenus"],
+    ]);
+    assert.ok(!calls.some((c) => c[0] === "clearCodexUserInputBubbles"));
+
+    calls.length = 0;
+    emit({ notificationBubbleAutoCloseSeconds: 0 });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { notificationBubbleAutoCloseSeconds: 0 }],
+      ["clearCodexNotifyBubbles", undefined, "settings-policy-disabled"],
+      ["clearCodexUserInputBubbles", undefined, undefined, "settings-policy-disabled"],
+      ["clearKimiNotifyBubbles", undefined, "settings-policy-disabled"],
       ["rebuildAllMenus"],
     ]);
   });
@@ -176,6 +205,16 @@ describe("settings-effect-router", () => {
     ]);
   });
 
+  it("re-syncs hidden HUD windows when low-power mode changes", () => {
+    const { calls, emit } = createHarness();
+    emit({ lowPowerIdleMode: true });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { lowPowerIdleMode: true }],
+      ["sendToRenderer", "low-power-idle-mode-change", true],
+      ["syncSessionHudVisibility"],
+    ]);
+  });
+
   it("routes language, session alias, and session HUD effects", () => {
     const { calls, emit } = createHarness();
 
@@ -184,6 +223,7 @@ describe("settings-effect-router", () => {
       ["updateMirrors", { lang: "zh", sessionAliases: { "local|claude|1": "work" } }],
       ["sendDashboardI18n"],
       ["sendSessionHudI18n"],
+      ["syncWindowTitles"],
       ["emitSessionSnapshot", { force: true }],
       ["rebuildAllMenus"],
     ]);
@@ -213,6 +253,21 @@ describe("settings-effect-router", () => {
     ]);
 
     calls.length = 0;
+    emit({ sessionHudShowQuota: false });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { sessionHudShowQuota: false }],
+      ["syncSessionHudVisibility"],
+      ["repositionFloatingBubbles"],
+    ]);
+
+    calls.length = 0;
+    emit({ quotaMergeSources: true });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { quotaMergeSources: true }],
+      ["emitSessionSnapshot", { force: true }],
+    ]);
+
+    calls.length = 0;
     emit({ sessionHudCleanupDetached: true });
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { sessionHudCleanupDetached: true }],
@@ -239,6 +294,18 @@ describe("settings-effect-router", () => {
     assert.deepStrictEqual(calls, [
       ["updateMirrors", { sessionHudPinned: false }],
       ["handleSessionHudPinnedChanged", false],
+    ]);
+  });
+
+  it("refreshes session effective modes immediately when global automation changes", () => {
+    const { calls, emit } = createHarness();
+
+    emit({ permissionAutomationMode: "auto-tools" });
+
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { permissionAutomationMode: "auto-tools" }],
+      ["emitSessionSnapshot", { force: true }],
+      ["rebuildAllMenus"],
     ]);
   });
 
@@ -298,6 +365,22 @@ describe("settings-effect-router", () => {
     ]);
   });
 
+  // #509: idleVisual changes re-rest the pet without rebuilding menus.
+  it("refreshes the idle visual on idleVisual changes, without a menu rebuild", () => {
+    const { calls, emit } = createHarness({
+      routerOptions: {
+        refreshIdleVisual: () => calls.push(["refreshIdleVisual"]),
+      },
+    });
+
+    emit({ idleVisual: { clawd: "clawd-idle-reading.svg" } });
+
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { idleVisual: { clawd: "clawd-idle-reading.svg" } }],
+      ["refreshIdleVisual"],
+    ]);
+  });
+
   it("rebuilds menus only once for menu-affecting keys", () => {
     const { calls, emit } = createHarness();
 
@@ -310,6 +393,145 @@ describe("settings-effect-router", () => {
       ["updateMirrors", { theme: "calico", size: "M" }],
       ["rebuildAllMenus"],
     ]);
+  });
+
+  it("resolves the active theme's tint without rebuilding quick menus", () => {
+    const clawd = { _id: "clawd", _builtin: true, _capabilities: { petTint: true } };
+    const { calls, emit } = createHarness({
+      routerOptions: { getActiveTheme: () => clawd },
+    });
+
+    emit({ petTint: { clawd: "gold", cloudling: "matcha" } });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { petTint: { clawd: "gold", cloudling: "matcha" } }],
+      ["sendToRenderer", "pet-tint-change", {
+        id: "gold",
+        filter: "sepia(0.8) saturate(2.2) hue-rotate(-18deg) brightness(1.05)",
+      }],
+    ]);
+
+    calls.length = 0;
+    emit({ petTint: { cloudling: "vaporwave" } });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { petTint: { cloudling: "vaporwave" } }],
+      ["sendToRenderer", "pet-tint-change", { id: "none", filter: "" }],
+    ]);
+  });
+
+  it("uses the active theme's pet tint policy", () => {
+    let activeTheme = {
+      _id: "calico",
+      _builtin: true,
+      _capabilities: { petTint: false },
+    };
+    const { calls, emit } = createHarness({
+      routerOptions: { getActiveTheme: () => activeTheme },
+    });
+
+    emit({ petTint: { calico: "vaporwave" } });
+    assert.deepStrictEqual(calls[1], [
+      "sendToRenderer",
+      "pet-tint-change",
+      { id: "none", filter: "" },
+    ]);
+
+    calls.length = 0;
+    activeTheme = {
+      _id: "cloudling",
+      _builtin: true,
+      _capabilities: { petTint: true },
+    };
+    emit({ petTint: { cloudling: "vaporwave" } });
+    assert.deepStrictEqual(calls[1], [
+      "sendToRenderer",
+      "pet-tint-change",
+      {
+        id: "vaporwave",
+        filter: "hue-rotate(75deg) saturate(1.25) brightness(1)",
+      },
+    ]);
+  });
+
+  it("resolves the active theme's accessory without rebuilding quick menus", () => {
+    let activeTheme = {
+      _id: "clawd",
+      _builtin: true,
+      _capabilities: { accessories: true },
+    };
+    const { calls, emit } = createHarness({
+      routerOptions: { getActiveTheme: () => activeTheme },
+    });
+
+    emit({ petAccessory: { clawd: "wizard-hat", cloudling: "halo" } });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { petAccessory: { clawd: "wizard-hat", cloudling: "halo" } }],
+      ["sendToRenderer", "pet-accessory-change", {
+        id: "wizard-hat",
+        assetFile: "wizard-hat.svg",
+        aspect: 15 / 16,
+        widthScale: 0.95,
+        offsetY: 0.3,
+      }],
+    ]);
+
+    calls.length = 0;
+    activeTheme = {
+      _id: "calico",
+      _builtin: true,
+      _capabilities: { accessories: false },
+    };
+    emit({ petAccessory: { calico: "halo" } });
+    assert.deepStrictEqual(calls, [
+      ["updateMirrors", { petAccessory: { calico: "halo" } }],
+      ["sendToRenderer", "pet-accessory-change", {
+        id: "none",
+        assetFile: null,
+        aspect: 1,
+        widthScale: 1,
+        offsetY: 0,
+      }],
+    ]);
+    assert.strictEqual(calls.some((call) => call[0] === "rebuildAllMenus"), false);
+  });
+
+  it("temporarily resolves the holiday accessory from an independent opt-in", () => {
+    const clawd = {
+      _id: "clawd",
+      _builtin: true,
+      _capabilities: { accessories: true },
+    };
+    const { calls, emit } = createHarness({
+      initialSnapshot: {
+        petAccessory: { clawd: "wizard-hat" },
+        holidayAccessoryEnabled: {},
+      },
+      routerOptions: {
+        getActiveTheme: () => clawd,
+        now: () => new Date(2026, 11, 24, 12, 0, 0, 0),
+      },
+    });
+
+    emit({ holidayAccessoryEnabled: { clawd: true } });
+    assert.deepStrictEqual(calls[1], [
+      "sendToRenderer",
+      "pet-accessory-change",
+      {
+        id: "santa-hat",
+        assetFile: "santa-hat.svg",
+        aspect: 16 / 9,
+        widthScale: 1,
+        offsetY: 0.2,
+      },
+    ]);
+
+    calls.length = 0;
+    emit({ petAccessory: { clawd: "halo" } });
+    assert.strictEqual(calls[1][2].id, "santa-hat");
+
+    calls.length = 0;
+    emit({ holidayAccessoryEnabled: {} });
+    assert.strictEqual(calls[1][2].id, "halo");
+    assert.strictEqual(calls.some((call) => call[0] === "rebuildAllMenus"), false);
   });
 
   it("broadcasts settings changes only to live renderer windows", () => {

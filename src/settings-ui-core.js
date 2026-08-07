@@ -30,6 +30,7 @@
     || ((data) => data);
   const applyAnimationPosterPayloadToRuntime = animMergeApi.applyAnimationPosterPayload
     || (() => ({ valid: false, stored: false, applied: false }));
+  const selectPickerApi = root.ClawdLanguagePicker || {};
 
   const shortcutApi = root.ClawdShortcutActions || {};
   const SHORTCUT_ACTIONS = shortcutApi.SHORTCUT_ACTIONS || {};
@@ -44,6 +45,12 @@
   // startsWith("Mac") not /\bMac\b/ — "MacIntel" has \w after "c", fails \b (regression #135).
   const IS_MAC = (navigator.platform || "").startsWith("Mac");
   const COLLAPSED_GROUPS_STORAGE_KEY = "clawd.settings.collapsedGroups.v1";
+  const NAVIGATION_STORAGE_KEY = "clawd.settings.navigation.v1";
+  const MAX_PERSISTED_SCROLL_TOP = 10_000_000;
+  // Runtime-only geometry belongs in the snapshot for consistency, but has no
+  // mounted Settings control. Re-rendering for it would destroy focused inputs
+  // and reset the active tab's scroll position after every window move/resize.
+  const RENDERER_INERT_SETTINGS_KEYS = new Set(["settingsWindowBounds", "dashboardWindowBounds"]);
 
   const state = {
     snapshot: null,
@@ -69,6 +76,7 @@
       animMapSwitches: new Map(),
       animMapReset: null,
       animOverrideTimingSliders: new Map(),
+      idleVisualPicker: null,
       bubblePolicySummary: null,
       sessionHudSummary: null,
       languagePicker: null,
@@ -76,6 +84,11 @@
       soundSummary: null,
       soundVolume: null,
       textScale: null,
+      roamMovementStyle: null,
+      settingsSelects: new Set(),
+      segmentedRadios: new Set(),
+      aboutAutoUpdate: null,
+      aboutUpdateStatus: null,
     },
     shortcutRecordingActionId: null,
     shortcutRecordingError: "",
@@ -95,13 +108,20 @@
     userThemeZipImportPending: false,
     codexPetRemovalPendingThemeId: null,
     animationOverridesData: null,
+    petTintOptions: [],
+    petAccessoryOptions: [],
     animationOverridesFetchSeq: 0,
     animationPosterRenderPending: false,
     animationPosterRenderFlags: null,
     animationPreviewPosterCache: new Map(),
     pendingAnimationOverrideEdits: new Map(),
     nextAnimationOverrideEditSeq: 1,
-    animOverridesSubtab: "animations",
+    animOverridesSubtab: "map",
+    settingsTabScrollPositions: new Map(),
+    // null = not chosen yet; the Agents tab resolves it from what is connected.
+    agentsSubtab: null,
+    agentsUnavailableQuery: "",
+    remoteApprovalSubtab: "channels",
     expandedOverrideRowIds: new Set(),
     assetPicker: {
       state: null,
@@ -112,6 +132,7 @@
     about: {
       infoCache: null,
       clickCount: 0,
+      updateCheckSnapshot: { state: "idle" },
     },
   };
 
@@ -168,6 +189,38 @@
     const entry = state.snapshot && state.snapshot.agents && state.snapshot.agents[agentId];
     if (agentId === "codex" && entry && entry.permissionMode === "intercept") return "intercept";
     return "native";
+  }
+
+  function readAgentCustomPermissionUrl(agentId) {
+    const entry = state.snapshot && state.snapshot.agents && state.snapshot.agents[agentId];
+    return entry && typeof entry.customPermissionUrl === "string" ? entry.customPermissionUrl : "";
+  }
+
+  function readAgentCustomDiscoveryPaths(agentId) {
+    if (agentId === "custom") {
+      const value = state.snapshot && state.snapshot.customToolDiscoveryPaths;
+      return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+    }
+    const entry = state.snapshot && state.snapshot.agents && state.snapshot.agents[agentId];
+    const value = entry && entry.customDiscoveryPaths;
+    return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+  }
+
+  function readCustomToolDetectionResults() {
+    const hints = runtime.agentInstallationHints;
+    const value = hints && hints.customTools;
+    return Array.isArray(value) ? value.filter((item) => item && typeof item.path === "string") : [];
+  }
+
+  function readCustomAgentDetectionResults() {
+    const hints = runtime.agentInstallationHints;
+    const value = hints && hints.customAgents;
+    return Array.isArray(value) ? value.filter((item) => item && typeof item.agentId === "string") : [];
+  }
+
+  function readCustomApplications() {
+    const value = state.snapshot && state.snapshot.customApplications;
+    return Array.isArray(value) ? value.filter((item) => item && typeof item.id === "string") : [];
   }
 
   function getShortcutValue(actionId) {
@@ -311,6 +364,155 @@
     return section;
   }
 
+  function buildSettingsSelect(config = {}) {
+    const factory = selectPickerApi.createSettingsSelect || selectPickerApi.createLanguagePicker;
+    if (typeof factory !== "function") {
+      throw new Error("language-picker.js failed to load before settings-ui-core.js");
+    }
+    const className = ["settings-select", config.className || ""].filter(Boolean).join(" ");
+    const control = factory({
+      ...config,
+      className,
+      lockWhilePending: config.lockWhilePending !== false,
+    });
+    state.mountedControls.settingsSelects.add(control);
+    return control;
+  }
+
+  function buildSegmentedRadio(config = {}) {
+    const options = Array.isArray(config.options)
+      ? config.options.filter((option) => option && option.value != null)
+      : [];
+    const values = options.map((option) => String(option.value));
+    let currentValue = values.includes(String(config.value))
+      ? String(config.value)
+      : (values[0] || "");
+    let disabled = config.disabled === true;
+    let pending = false;
+    let disposed = false;
+
+    const element = document.createElement("div");
+    element.className = ["segmented", "settings-segmented-radio", config.className || ""]
+      .filter(Boolean)
+      .join(" ");
+    element.setAttribute("role", "radiogroup");
+    if (config.ariaLabel) element.setAttribute("aria-label", config.ariaLabel);
+
+    const buttons = options.map((option) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("role", "radio");
+      button.dataset.value = String(option.value);
+
+      const label = document.createElement("span");
+      label.className = "settings-segmented-radio-label";
+      label.textContent = option.label == null ? String(option.value) : String(option.label);
+      button.appendChild(label);
+
+      if (option.description) {
+        const description = document.createElement("span");
+        description.className = "settings-segmented-radio-description";
+        description.textContent = String(option.description);
+        button.appendChild(description);
+      }
+      element.appendChild(button);
+      return button;
+    });
+
+    function syncVisualState() {
+      element.classList.toggle("pending", pending);
+      element.classList.toggle("disabled", disabled);
+      element.setAttribute("aria-busy", pending ? "true" : "false");
+      for (const button of buttons) {
+        const selected = button.dataset.value === currentValue;
+        button.classList.toggle("active", selected);
+        button.setAttribute("aria-checked", selected ? "true" : "false");
+        button.tabIndex = selected ? 0 : -1;
+        button.disabled = disabled || pending;
+      }
+    }
+
+    async function selectValue(nextValue) {
+      const next = String(nextValue);
+      if (disposed || disabled || pending || !values.includes(next)) return false;
+      if (next === currentValue) return true;
+      const previous = currentValue;
+      currentValue = next;
+      pending = true;
+      syncVisualState();
+      let accepted = true;
+      try {
+        if (typeof config.onChange === "function") {
+          accepted = (await Promise.resolve(config.onChange(next))) !== false;
+        }
+      } catch (_) {
+        accepted = false;
+      }
+      if (!accepted) currentValue = previous;
+      pending = false;
+      syncVisualState();
+      return accepted;
+    }
+
+    function onClick(event) {
+      const button = event && event.currentTarget;
+      if (button) void selectValue(button.dataset.value);
+    }
+
+    function onKeyDown(event) {
+      if (disabled || pending || buttons.length === 0) return;
+      const currentIndex = Math.max(0, buttons.indexOf(event.currentTarget));
+      let nextIndex = currentIndex;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextIndex = (currentIndex + 1) % buttons.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextIndex = (currentIndex - 1 + buttons.length) % buttons.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = buttons.length - 1;
+      } else if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      const target = buttons[nextIndex];
+      if (target && typeof target.focus === "function") target.focus();
+      void selectValue(target.dataset.value);
+    }
+
+    for (const button of buttons) {
+      button.addEventListener("click", onClick);
+      button.addEventListener("keydown", onKeyDown);
+    }
+    syncVisualState();
+
+    const control = {
+      element,
+      getValue: () => currentValue,
+      setValue(value) {
+        const next = String(value);
+        if (!values.includes(next)) return false;
+        currentValue = next;
+        syncVisualState();
+        return true;
+      },
+      setDisabled(value) {
+        disabled = value === true;
+        syncVisualState();
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        for (const button of buttons) {
+          button.removeEventListener("click", onClick);
+          button.removeEventListener("keydown", onKeyDown);
+        }
+      },
+    };
+    state.mountedControls.segmentedRadios.add(control);
+    return control;
+  }
+
   function readCollapsedGroupState() {
     try {
       const raw = localStorage.getItem(COLLAPSED_GROUPS_STORAGE_KEY);
@@ -351,9 +553,12 @@
     desc = "",
     summary = null,
     headerContent = null,
+    headerAction = null,
+    disclosureLabel = "",
     children = [],
     defaultCollapsed = false,
     className = "",
+    animateExpansion = true,
   }) {
     const storedState = readCollapsedGroupState();
     let collapsed = Object.prototype.hasOwnProperty.call(storedState, id)
@@ -366,17 +571,23 @@
 
     const header = document.createElement("div");
     header.className = "collapsible-group-header";
-    header.setAttribute("role", "button");
-    header.setAttribute("tabindex", "0");
+    const disclosure = headerAction ? document.createElement("div") : header;
+    if (headerAction) {
+      header.classList.add("collapsible-group-header-with-action");
+      disclosure.className = "collapsible-group-disclosure";
+      header.appendChild(disclosure);
+    }
+    disclosure.setAttribute("role", "button");
+    disclosure.setAttribute("tabindex", "0");
 
     const chevron = createDisclosureChevron("collapsible-group-chevron");
-    header.appendChild(chevron);
+    disclosure.appendChild(chevron);
 
     if (headerContent) {
       const headerWrap = document.createElement("div");
       headerWrap.className = "collapsible-group-header-content";
       headerWrap.appendChild(headerContent);
-      header.appendChild(headerWrap);
+      disclosure.appendChild(headerWrap);
     } else {
       const text = document.createElement("div");
       text.className = "collapsible-group-text";
@@ -390,7 +601,7 @@
         description.textContent = desc;
         text.appendChild(description);
       }
-      header.appendChild(text);
+      disclosure.appendChild(text);
     }
 
     if (summary) {
@@ -398,7 +609,14 @@
       summaryWrap.className = "collapsibleSummary collapsible-group-summary";
       if (typeof summary === "string") summaryWrap.textContent = summary;
       else summaryWrap.appendChild(summary);
-      header.appendChild(summaryWrap);
+      disclosure.appendChild(summaryWrap);
+    }
+
+    if (headerAction) {
+      const actionWrap = document.createElement("div");
+      actionWrap.className = "collapsible-group-header-action";
+      actionWrap.appendChild(headerAction);
+      header.appendChild(actionWrap);
     }
 
     const body = document.createElement("div");
@@ -411,6 +629,44 @@
 
     function setExpandedBodyHeight() {
       body.style.setProperty("--collapsible-body-height", measureCollapsibleBodyHeight());
+    }
+
+    function refreshCollapsibleHeight() {
+      if (collapsed || !group.classList.contains("expanding")) return;
+      requestAnimationFrame(() => {
+        if (!collapsed && group.classList.contains("expanding")) setExpandedBodyHeight();
+      });
+    }
+
+    function mutateCollapsibleBody(mutate) {
+      if (typeof mutate !== "function") return;
+      if (collapsed || group.classList.contains("collapsing")) {
+        mutate();
+        return;
+      }
+      if (group.classList.contains("expanding")) {
+        mutate();
+        refreshCollapsibleHeight();
+        return;
+      }
+
+      const beforeHeight = body.scrollHeight;
+      mutate();
+      const afterHeight = body.scrollHeight;
+      const prefersReducedMotion = typeof window.matchMedia === "function"
+        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (beforeHeight === afterHeight || prefersReducedMotion) return;
+
+      // The settled-open body normally uses max-height:none so reflow can grow
+      // freely. Pin its pre-mutation height for one frame, then animate to the
+      // new measured height instead of letting async rows cause a layout jump.
+      body.style.setProperty("--collapsible-body-height", `${beforeHeight}px`);
+      group.classList.add("resizing");
+      void body.offsetHeight;
+      requestAnimationFrame(() => {
+        if (collapsed || !group.classList.contains("resizing")) return;
+        body.style.setProperty("--collapsible-body-height", `${afterHeight}px`);
+      });
     }
 
     function setBodyInteractivity(isCollapsed) {
@@ -442,9 +698,10 @@
     }
 
     function applyCollapsedState({ animate = false } = {}) {
-      header.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      header.setAttribute("aria-label", collapsed ? t("collapsibleExpand") : t("collapsibleCollapse"));
-      group.classList.remove("expanding", "collapsing");
+      disclosure.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      const actionLabel = collapsed ? t("collapsibleExpand") : t("collapsibleCollapse");
+      disclosure.setAttribute("aria-label", disclosureLabel ? `${actionLabel}: ${disclosureLabel}` : actionLabel);
+      group.classList.remove("expanding", "collapsing", "resizing");
       if (!animate) {
         group.classList.toggle("collapsed", collapsed);
         setBodyInteractivity(collapsed);
@@ -485,11 +742,11 @@
       const nextState = readCollapsedGroupState();
       nextState[id] = collapsed;
       writeCollapsedGroupState(nextState);
-      preserveScrollAnchor(() => applyCollapsedState({ animate: true }));
+      preserveScrollAnchor(() => applyCollapsedState({ animate: animateExpansion }));
     }
 
-    header.addEventListener("click", toggleCollapsed);
-    header.addEventListener("keydown", (ev) => {
+    disclosure.addEventListener("click", toggleCollapsed);
+    disclosure.addEventListener("keydown", (ev) => {
       if (ev.key === " " || ev.key === "Enter") {
         ev.preventDefault();
         toggleCollapsed();
@@ -500,7 +757,7 @@
     group.appendChild(body);
     body.addEventListener("transitionend", (ev) => {
       if (ev.target !== body || ev.propertyName !== "max-height") return;
-      group.classList.remove("expanding", "collapsing");
+      group.classList.remove("expanding", "collapsing", "resizing");
       // Release the pinned height once settled so later reflows (text zoom,
       // window resize) can grow the body instead of clipping at the bottom.
       if (!collapsed) body.style.setProperty("--collapsible-body-height", "none");
@@ -509,6 +766,8 @@
     requestAnimationFrame(() => {
       if (!collapsed) body.style.setProperty("--collapsible-body-height", "none");
     });
+    group.refreshCollapsibleHeight = refreshCollapsibleHeight;
+    group.mutateCollapsibleBody = mutateCollapsibleBody;
     return group;
   }
 
@@ -804,6 +1063,9 @@
     if (state.mountedControls.languagePicker && typeof state.mountedControls.languagePicker.dispose === "function") {
       state.mountedControls.languagePicker.dispose();
     }
+    if (state.mountedControls.idleVisualPicker && typeof state.mountedControls.idleVisualPicker.dispose === "function") {
+      state.mountedControls.idleVisualPicker.dispose();
+    }
     if (state.mountedControls.size && typeof state.mountedControls.size.dispose === "function") {
       Promise.resolve(state.mountedControls.size.dispose()).catch(() => {});
     }
@@ -816,6 +1078,14 @@
     if (state.mountedControls.textScale && typeof state.mountedControls.textScale.dispose === "function") {
       state.mountedControls.textScale.dispose();
     }
+    for (const control of state.mountedControls.settingsSelects) {
+      if (control && typeof control.dispose === "function") control.dispose();
+    }
+    state.mountedControls.settingsSelects.clear();
+    for (const control of state.mountedControls.segmentedRadios) {
+      if (control && typeof control.dispose === "function") control.dispose();
+    }
+    state.mountedControls.segmentedRadios.clear();
     state.mountedControls.generalSwitches.clear();
     state.mountedControls.bubblePolicyControls.clear();
     state.mountedControls.sessionCleanupControls.clear();
@@ -828,10 +1098,14 @@
     state.mountedControls.bubblePolicySummary = null;
     state.mountedControls.sessionHudSummary = null;
     state.mountedControls.languagePicker = null;
+    state.mountedControls.idleVisualPicker = null;
     state.mountedControls.size = null;
     state.mountedControls.soundSummary = null;
     state.mountedControls.soundVolume = null;
     state.mountedControls.textScale = null;
+    state.mountedControls.roamMovementStyle = null;
+    state.mountedControls.aboutAutoUpdate = null;
+    state.mountedControls.aboutUpdateStatus = null;
   }
 
   function syncMountedSizeControl({ fromBroadcast = false } = {}) {
@@ -860,20 +1134,99 @@
     if (modal && typeof renderHooks.modal === "function") renderHooks.modal();
   }
 
+  function normalizePersistedScrollTop(value) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+    return Math.min(value, MAX_PERSISTED_SCROLL_TOP);
+  }
+
+  function captureActiveTabScrollPosition() {
+    const content = document.getElementById("content");
+    if (!content || !tabs[state.activeTab]) return;
+    const scrollTop = normalizePersistedScrollTop(Number(content.scrollTop));
+    if (scrollTop !== null) runtime.settingsTabScrollPositions.set(state.activeTab, scrollTop);
+  }
+
+  function writeNavigationState() {
+    const scrollPositions = {};
+    for (const [tabId, value] of runtime.settingsTabScrollPositions) {
+      const scrollTop = normalizePersistedScrollTop(value);
+      if (tabs[tabId] && scrollTop !== null) scrollPositions[tabId] = scrollTop;
+    }
+    try {
+      localStorage.setItem(NAVIGATION_STORAGE_KEY, JSON.stringify({
+        activeTab: tabs[state.activeTab] ? state.activeTab : "general",
+        scrollPositions,
+      }));
+    } catch (_) {}
+  }
+
+  function persistNavigationState() {
+    captureActiveTabScrollPosition();
+    writeNavigationState();
+  }
+
+  function restoreNavigationState() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(NAVIGATION_STORAGE_KEY) || "null");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+      if (typeof parsed.activeTab === "string" && tabs[parsed.activeTab]) {
+        state.activeTab = parsed.activeTab;
+      }
+      const scrollPositions = parsed.scrollPositions;
+      if (scrollPositions && typeof scrollPositions === "object" && !Array.isArray(scrollPositions)) {
+        for (const [tabId, value] of Object.entries(scrollPositions)) {
+          const scrollTop = normalizePersistedScrollTop(value);
+          if (tabs[tabId] && scrollTop !== null) {
+            runtime.settingsTabScrollPositions.set(tabId, scrollTop);
+          }
+        }
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function restoreActiveTabScrollPosition() {
+    const content = document.getElementById("content");
+    if (!content) return;
+    const tabId = state.activeTab;
+    const targetScrollTop = runtime.settingsTabScrollPositions.get(tabId) || 0;
+    content.scrollTop = targetScrollTop;
+    requestAnimationFrame(() => {
+      if (state.activeTab !== tabId) return;
+      if (document.getElementById("content") !== content) return;
+      content.scrollTop = targetScrollTop;
+    });
+  }
+
   function selectTab(nextTab) {
     const prevTabId = state.activeTab;
     if (prevTabId === nextTab) return;
+    captureActiveTabScrollPosition();
+    const content = document.getElementById("content");
     const prevTab = tabs[prevTabId];
     if (prevTab && typeof prevTab.onExit === "function") {
       prevTab.onExit(core);
     }
     state.activeTab = nextTab;
+    writeNavigationState();
     requestRender({ sidebar: true, content: true, modal: true });
+    if (!content) return;
+
+    const targetScrollTop = runtime.settingsTabScrollPositions.get(nextTab) || 0;
+    content.scrollTop = targetScrollTop;
+    requestAnimationFrame(() => {
+      if (state.activeTab !== nextTab) return;
+      if (document.getElementById("content") !== content) return;
+      content.scrollTop = targetScrollTop;
+    });
   }
 
   function applyBootstrap(snapshotValue) {
     state.snapshot = snapshotValue || {};
     requestRender({ sidebar: true, content: true, modal: true });
+    restoreActiveTabScrollPosition();
   }
 
   function applyAgentMetadata(list) {
@@ -886,7 +1239,13 @@
     const normalized = {
       checkedAt: Number.isFinite(source.checkedAt) ? source.checkedAt : null,
       agents: Array.isArray(source.agents) ? source.agents : [],
+      customAgents: Array.isArray(source.customAgents) ? source.customAgents : [],
+      customTools: Array.isArray(source.customTools) ? source.customTools : [],
       skippedAgentIds: Array.isArray(source.skippedAgentIds) ? source.skippedAgentIds : [],
+      wslAgents: Array.isArray(source.wslAgents) ? source.wslAgents : [],
+      wslDistros: Array.isArray(source.wslDistros) ? source.wslDistros : [],
+      wslPending: source.wslPending === true,
+      wslSupported: source.wslSupported === true,
     };
     if (typeof source.error === "string" && source.error) normalized.error = source.error;
     return normalized;
@@ -896,17 +1255,35 @@
     const result = {
       checkedAt: null,
       agents: [],
+      customAgents: [],
+      customTools: [],
       skippedAgentIds: [],
+      wslAgents: [],
+      wslDistros: [],
+      wslPending: false,
+      wslSupported: false,
     };
     if (error) result.error = error;
     return result;
   }
 
-  function fetchAgentInstallationHints({ force = false } = {}) {
+  function fetchAgentInstallationHints({ force = false, refreshWsl = false } = {}) {
     if (runtime.agentInstallationHintsPending) {
-      return runtime.agentInstallationHintsPromise || Promise.resolve(runtime.agentInstallationHints);
+      const inFlight = runtime.agentInstallationHintsPromise || Promise.resolve(runtime.agentInstallationHints);
+      // A manual WSL rescan must not be swallowed by a passive fetch that
+      // happens to be in flight (e.g. the tab's mount-time poll while
+      // wslPending) — chain one real rescan after it settles.
+      if (refreshWsl && !runtime.agentInstallationHintsWslRefreshQueued) {
+        runtime.agentInstallationHintsWslRefreshQueued = true;
+        return inFlight.then(() => {
+          runtime.agentInstallationHintsWslRefreshQueued = false;
+          return fetchAgentInstallationHints({ refreshWsl: true });
+        });
+      }
+      return inFlight;
     }
-    if (!force && runtime.agentInstallationHintsFetched) {
+    // refreshWsl always re-fetches; plain force only if not already done
+    if (!force && !refreshWsl && runtime.agentInstallationHintsFetched) {
       return Promise.resolve(runtime.agentInstallationHints);
     }
     if (!window.settingsAPI || typeof window.settingsAPI.detectAgentInstallations !== "function") {
@@ -915,8 +1292,12 @@
       return Promise.resolve(runtime.agentInstallationHints);
     }
 
+    // refreshWsl triggers a backend WSL re-scan; force just bypasses the
+    // frontend cache. The backend only inspects refreshWsl — passing force
+    // in the IPC payload would be dead weight.
+    const opts = refreshWsl ? { refreshWsl: true } : undefined;
     runtime.agentInstallationHintsPending = true;
-    runtime.agentInstallationHintsPromise = window.settingsAPI.detectAgentInstallations()
+    runtime.agentInstallationHintsPromise = window.settingsAPI.detectAgentInstallations(opts)
       .then((result) => {
         runtime.agentInstallationHints = normalizeAgentInstallationHints(result);
         return runtime.agentInstallationHints;
@@ -933,6 +1314,28 @@
         runtime.agentInstallationHintsFetched = true;
         runtime.agentInstallationHintsPromise = null;
         if (state.activeTab === "agents") requestRender({ content: true });
+        // wslPending means no WSL scan has ever completed. Startup does not
+        // pre-scan (running a command in each distro boots every stopped VM),
+        // so the first Agents-tab visit kicks off the real scan here. No loop:
+        // the scan marks the cache detected on success AND failure, so
+        // wslPending is false on the next fetch either way.
+        if (
+          !refreshWsl &&
+          runtime.agentInstallationHints &&
+          runtime.agentInstallationHints.wslPending &&
+          runtime.agentInstallationHints.wslSupported
+        ) {
+          if (state.activeTab === "agents") {
+            fetchAgentInstallationHints({ refreshWsl: true });
+          } else {
+            // User left the tab before this fetch resolved. Re-arm the
+            // fetched flag so the next Agents-tab visit takes the full
+            // fetch path again and reaches this trigger — otherwise the
+            // flag short-circuits every later plain fetch and the auto
+            // scan is permanently lost for this settings session.
+            runtime.agentInstallationHintsFetched = false;
+          }
+        }
       });
     return runtime.agentInstallationHintsPromise;
   }
@@ -942,13 +1345,21 @@
       runtime.themeList = [];
       return Promise.resolve([]);
     }
+    const previousThemeList = Array.isArray(runtime.themeList) ? runtime.themeList : [];
     return window.settingsAPI.listThemes().then((list) => {
-      runtime.themeList = Array.isArray(list) ? list : [];
+      const nextThemeList = Array.isArray(list) ? list : [];
+      // Built-in themes make an empty successful list impossible in a healthy
+      // install. Main also returns [] when enumeration throws, so preserve an
+      // already-rendered list instead of blanking the entire Theme tab.
+      if (nextThemeList.length === 0 && previousThemeList.length > 0) {
+        return previousThemeList;
+      }
+      runtime.themeList = nextThemeList;
       return runtime.themeList;
     }).catch((err) => {
       console.warn("settings: listThemes failed", err);
-      runtime.themeList = [];
-      return [];
+      runtime.themeList = previousThemeList;
+      return previousThemeList;
     });
   }
 
@@ -1155,6 +1566,13 @@
     if (!state.snapshot) return;
 
     const changes = payload && payload.changes;
+    const changeKeys = changes && typeof changes === "object" ? Object.keys(changes) : [];
+    if (
+      changeKeys.length > 0
+      && changeKeys.every((key) => RENDERER_INERT_SETTINGS_KEYS.has(key))
+    ) {
+      return;
+    }
     clearTransientStateForChanges(changes);
     const needsAnimOverridesRefresh = !!(changes && (
       "theme" in changes || "themeVariant" in changes || "themeOverrides" in changes
@@ -1207,16 +1625,15 @@
         return;
       }
       if (state.activeTab === "animOverrides" || runtime.assetPicker.state) {
-        fetchAnimationOverridesData().then(() => {
+        Promise.all([fetchAnimationOverridesData(), fetchThemes()]).then(() => {
           normalizeAssetPickerSelection();
           requestRender({ sidebar: true, content: true, modal: true });
         });
         return;
       }
-      if (state.activeTab !== "animMap") {
-        requestRender({ sidebar: true, content: true });
-        return;
-      }
+      // Any other tab that surfaces theme-derived content: full re-render.
+      requestRender({ sidebar: true, content: true });
+      return;
     }
 
     if (needsAnimOverridesRefresh && (state.activeTab === "animOverrides" || runtime.assetPicker.state)) {
@@ -1245,19 +1662,124 @@
     readAgentFlagValue,
     readAgentIntegrationInstalled,
     readAgentPermissionMode,
+    readAgentCustomPermissionUrl,
+    readAgentCustomDiscoveryPaths,
+    readCustomToolDetectionResults,
+    readCustomAgentDetectionResults,
+    readCustomApplications,
     getShortcutValue,
     getLang,
     readThemeOverrideMap,
     hasAnyThemeOverride,
   };
 
+  function showSettingsConfirmModal({
+    title,
+    detail,
+    actions,
+    checkboxLabel = "",
+    checkboxChecked = false,
+    returnDetails = false,
+  }) {
+    const rootNode = document.getElementById("modalRoot");
+    if (!rootNode) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let settled = false;
+      const overlay = document.createElement("div");
+      overlay.className = "modal-backdrop settings-confirm-backdrop";
+
+      const modal = document.createElement("div");
+      modal.className = "settings-confirm-modal";
+      modal.setAttribute("role", "dialog");
+      modal.setAttribute("aria-modal", "true");
+
+      const icon = document.createElement("div");
+      icon.className = "settings-confirm-icon";
+      icon.textContent = "!";
+
+      const titleNode = document.createElement("h2");
+      titleNode.textContent = title;
+
+      const detailNode = document.createElement("p");
+      detailNode.textContent = detail;
+
+      let checkboxInput = null;
+      let checkboxRow = null;
+      if (checkboxLabel) {
+        checkboxRow = document.createElement("label");
+        checkboxRow.className = "settings-confirm-checkbox";
+        checkboxInput = document.createElement("input");
+        checkboxInput.type = "checkbox";
+        checkboxInput.checked = checkboxChecked === true;
+        const checkboxText = document.createElement("span");
+        checkboxText.textContent = checkboxLabel;
+        checkboxRow.appendChild(checkboxInput);
+        checkboxRow.appendChild(checkboxText);
+      }
+
+      const actionsNode = document.createElement("div");
+      actionsNode.className = "settings-confirm-actions";
+
+      function close(actionId) {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener("keydown", onKeyDown, true);
+        rootNode.innerHTML = "";
+        resolve(returnDetails
+          ? {
+            actionId,
+            checkboxChecked: !!(checkboxInput && checkboxInput.checked),
+          }
+          : actionId);
+      }
+
+      function onKeyDown(ev) {
+        if (ev.key === "Escape") close(null);
+      }
+
+      overlay.addEventListener("click", (ev) => {
+        if (ev.target === overlay) close(null);
+      });
+      const buttons = (Array.isArray(actions) ? actions : []).map((action) => {
+        const button = document.createElement("button");
+        const tone = action && typeof action.tone === "string" ? action.tone : "neutral";
+        const toneClass = tone === "accent"
+          ? "accent"
+          : (tone === "danger" ? "settings-confirm-danger" : "");
+        button.type = "button";
+        button.className = `soft-btn${toneClass ? ` ${toneClass}` : ""}`;
+        button.textContent = action && action.label ? action.label : "";
+        button.addEventListener("click", () => close(action && action.id ? action.id : null));
+        actionsNode.appendChild(button);
+        return { action, button };
+      });
+      document.addEventListener("keydown", onKeyDown, true);
+      modal.appendChild(icon);
+      modal.appendChild(titleNode);
+      modal.appendChild(detailNode);
+      if (checkboxRow) modal.appendChild(checkboxRow);
+      modal.appendChild(actionsNode);
+      overlay.appendChild(modal);
+      rootNode.innerHTML = "";
+      rootNode.appendChild(overlay);
+      const focusTarget =
+        buttons.find((action) => action.action && action.action.defaultFocus)
+        || buttons[buttons.length - 1]
+        || null;
+      if (focusTarget) focusTarget.button.focus();
+    });
+  }
+
   core.helpers = {
     t,
+    showSettingsConfirmModal,
     escapeHtml,
     setSwitchVisual,
     attachAnimatedSwitch,
     buildSwitchRow,
     buildSection,
+    buildSettingsSelect,
+    buildSegmentedRadio,
     buildCollapsibleGroup,
     createDisclosureChevron,
     attachActivation,
@@ -1289,6 +1811,8 @@
     installRenderHooks,
     requestRender,
     selectTab,
+    persistNavigationState,
+    restoreNavigationState,
     applyBootstrap,
     applyAgentMetadata,
     applyChanges,

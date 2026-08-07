@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/tray-icon.png" width="128" alt="Clawd">
+  <img src="assets/icon.png" width="128" alt="Clawd">
 </p>
 <h1 align="center">Clawd 桌寵</h1>
 <p align="center">
@@ -28,7 +28,7 @@ Clawd 住在你的桌面上，即時感知 AI 程式設計助理在做什麼。�
 
 你提問時牠思考，工具執行時牠打字，子代理在跑時牠會戴耳機律動或三球雜耍，審查權限時牠彈卡片，任務完成時牠慶祝，你離開時牠睡覺。內建三套主題：**Clawd**（像素螃蟹）、**Calico**（三花貓）和 **Cloudling**（雲寶），支援自訂主題，也支援匯入 Codex Pet 動畫套件。
 
-> 支援 Windows 11、macOS 和 Ubuntu/Linux。Windows 發布版本提供獨立的 x64 和 ARM64 安裝檔。從原始碼執行需要 Node.js。支援 **Claude Code**、**Codex CLI**、**Copilot CLI**、**Gemini CLI**、**Antigravity CLI (agy)**、**Cursor Agent**、**CodeBuddy**、**Kiro CLI**、**Kimi Code CLI（Kimi-CLI）**、**Qwen Code**、**opencode**、**Pi**、**OpenClaw**、**Hermes Agent** 與 **Qoder**。
+> 支援 Windows 11、macOS 和 Ubuntu/Linux。Windows 發布版本提供獨立的 x64 和 ARM64 安裝檔。從原始碼執行需要 Node.js。支援 **Claude Code**、**Codex CLI**、**Copilot CLI**、**Gemini CLI**、**Antigravity CLI (agy)**、**Cursor Agent**、**CodeBuddy**、**WorkBuddy**、**Kiro CLI**、**Kimi Code CLI（Kimi-CLI）**、**Qwen Code**、**CodeWhale**、**opencode**、**MiMo Code**、**Pi**、**OpenClaw**、**Hermes Agent**、**Qoder**、**QoderWork** 與 **Reasonix CLI**。
 
 ## 功能特色
 
@@ -41,10 +41,13 @@ Clawd 住在你的桌面上，即時感知 AI 程式設計助理在做什麼。�
 - **Antigravity CLI (agy)** — 在 `~/.gemini/config/hooks.json` 設定 command hook（已有 Antigravity 設定時 Clawd 啟動會自動註冊，或執行 `npm run install:antigravity-hooks`）；**僅同步狀態**：Clawd 不會為 agy 顯示任何權限對話框，所有 Allow / Deny / Always-allow 都在 agy 自己的終端機選單完成
 - **Cursor Agent** — [Cursor IDE hooks](https://cursor.com/docs/agent/hooks)，設定在 `~/.cursor/hooks.json`（Clawd 啟動時自動註冊，或執行 `npm run install:cursor-hooks`）
 - **CodeBuddy** — 以 Claude Code 相容的 command hook + HTTP 權限 hook 整合，設定寫入 `~/.codebuddy/settings.json`（Clawd 啟動時自動註冊，或執行 `node hooks/codebuddy-install.js`）
+- **自訂 HTTP Agent** — 在 Settings 註冊其他本機應用，再由應用或 adapter 主動向 Clawd 的動態 `/state` 位址上報事件；註冊不會安裝 hook，v1 僅同步狀態，權限決定留在應用自己的介面。詳見[自訂 HTTP Agent 指南](docs/guides/custom-agent-http.md)
+- **WorkBuddy** — 可選 Claude Code 相容 command hook，當前使用 `~/.workbuddy-ai/settings.json`，舊版使用 `~/.workbuddy/settings.json`（從 Settings → Agents 安裝，或執行 `node hooks/workbuddy-install.js`）；僅同步狀態與通知，權限仍由 WorkBuddy 原生 GUI 處理
 - **Kiro CLI** — command hooks 注入到 `~/.kiro/agents/` 下的自訂 agent 設定，並自動建立 `clawd` agent；Clawd 每次啟動都會從內建的 `kiro_default` 重新同步它，盡量和預設 agent 保持一致。macOS 與 Windows 上狀態動效已驗證可用；需要時可用 `kiro-cli --agent clawd` 或在工作階段內執行 `/agent swap clawd` 啟用 hooks（Clawd 啟動時自動註冊，或執行 `npm run install:kiro-hooks`）
 - **Kimi Code CLI（Kimi-CLI）** — 在 `~/.kimi/config.toml` 的 `[[hooks]]` 條目設定 command hooks（Clawd 啟動時自動註冊，或執行 `npm run install:kimi-hooks`）
 - **Qwen Code** — 在 `~/.qwen/settings.json` 設定 command hooks（Clawd 啟動時自動註冊，或執行 `npm run install:qwen-hooks`）；支援狀態追蹤和 Qwen `PermissionRequest` 桌面權限對話框
-- **opencode** — [外掛整合](https://opencode.ai/docs/plugins)，寫入 `~/.config/opencode/opencode.json`（Clawd 啟動時自動註冊）；零延遲事件流、Allow/Always/Deny 權限對話框、`task` 工具分派平行子代理時自動播放建築動畫
+- **opencode** — 可選 [外掛整合](https://opencode.ai/docs/plugins)，寫入 `~/.config/opencode/opencode.json`（從 Settings → Agents 安裝）；支援零延遲事件流與 Allow/Always/Deny 權限對話框。`task` 工具產生的子工作階段是 headless，不參與可見的多工作階段動畫聚合
+- **MiMo Code** — 可選 [外掛整合](https://opencode.ai/docs/plugins)，寫入 `~/.config/mimocode/mimocode.jsonc`（從 Settings → Agents 安裝，或執行 `node hooks/mimocode-install.js`）；與 opencode 共用 `@mimo-ai/plugin` SDK 與權限行為，`task` 子工作階段同樣是 headless
 - **Pi** — 以全域擴充功能整合，寫入 `~/.pi/agent/extensions/clawd-on-desk`（Clawd 啟動時自動註冊，或執行 `npm run install:pi-extension`）；僅同步互動式 Pi 工作階段生命週期和工具活動狀態，並保留 Pi 預設 YOLO 行為
 - **OpenClaw** — 靠 `~/.openclaw/openclaw.json` 裡的外掛路徑做狀態感知（OpenClaw 設定已存在時 Clawd 啟動會自動註冊，或執行 `npm run install:openclaw-plugin`）；Phase 1 針對本機 `openclaw tui --local` 工作階段，只驅動動畫，沒接權限對話框和終端機焦點
 - **Hermes Agent** — [外掛整合](https://hermes-agent.org/)，寫入 Hermes 受管理的外掛目錄（偵測到 Hermes 後 Clawd 啟動時自動註冊，或執行 `npm run install:hermes-plugin`）；支援狀態、工作階段、SessionEnd 和終端機焦點
@@ -64,7 +67,7 @@ Clawd 住在你的桌面上，即時感知 AI 程式設計助理在做什麼。�
 
 ### 權限審查對話框
 
-- **桌面端權限審查** — Claude Code、Codex CLI、CodeBuddy 或 opencode 請求工具權限時，Clawd 會彈出浮動卡片，不用切回終端機
+- **桌面端權限審查** — Claude Code、Codex CLI、CodeBuddy、opencode 或 MiMo Code 請求工具權限時，Clawd 會彈出浮動卡片，不用切回終端機
 - **允許 / 拒絕 / Agent 原生擴充功能** — 一鍵允許或拒絕；如果該 Agent 支援，還會顯示權限規則或 `Always` 之類的額外動作
 - **全域快速鍵** — `Ctrl+Shift+Y` 允許、`Ctrl+Shift+N` 拒絕最新的權限對話框（只在對話框可見時註冊）
 - **堆疊版面** — 多個權限請求從螢幕右下角往上堆疊
@@ -94,7 +97,7 @@ Clawd 住在你的桌面上，即時感知 AI 程式設計助理在做什麼。�
 - **位置記憶** — 重新啟動後 Clawd 回到上次的位置（包括迷你模式）
 - **單一執行個體鎖** — 防止重複啟動
 - **自動啟動** — Claude Code 的 SessionStart hook 可在 Clawd 沒在跑時自動啟動它
-- **勿擾模式** — 右鍵或系統匣選單進入休眠，所有 hook 事件靜默，直到手動喚醒。勿擾期間不彈權限對話框——Codex 和 opencode 會退回原生的命令列確認，Claude Code 和 CodeBuddy 會退回各自內建的權限確認流程；Antigravity 和 Pi 都是僅同步狀態的整合
+- **勿擾模式** — 右鍵或系統匣選單進入休眠，所有 hook 事件靜默，直到手動喚醒。勿擾期間不彈權限對話框——Codex、opencode 和 MiMo Code 會退回原生的命令列確認，Claude Code 和 CodeBuddy 會退回各自內建的權限確認流程；Antigravity 和 Pi 都是僅同步狀態的整合
 - **提示音效** — 任務完成和權限請求時播放短音效（右鍵選單可開關；10 秒冷卻，勿擾模式自動靜音）
 - **系統匣** — 調大小（S/M/L）、勿擾、語言切換、登入時啟動、檢查更新
 - **國際化** — 支援英文、簡體中文、繁體中文、韓文和日文介面，可從右鍵選單或系統匣切換
@@ -161,7 +164,7 @@ npm install
 npm start
 ```
 
-**Claude Code**、**Codex CLI**、**Copilot CLI** 會自動註冊 hooks，開箱即用。**Gemini CLI**、**Antigravity CLI (agy)**、**Cursor Agent**、**CodeBuddy**、**Kiro CLI**、**Kimi Code CLI（Kimi-CLI）**、**Qwen Code**、**opencode**、**Pi**、**OpenClaw**、**Hermes Agent**、**Qoder** 在已安裝的前提下，會在 Clawd 啟動時自動同步（OpenClaw 還需要已有設定）。也涵蓋遠端 SSH、WSL 及平台說明（macOS 與 Linux）：**[設定指南（簡體中文）](docs/guides/setup-guide.zh-CN.md)**
+**Claude Code** 與 **Codex CLI** 預設會自動同步 hooks。其他 Agent 必須先在 **Settings → Agents** 安裝對應整合；只有已安裝且啟用的整合，Clawd 才會在啟動時繼續同步。也涵蓋遠端 SSH、WSL 及平台說明（macOS 與 Linux）：**[設定指南（簡體中文）](docs/guides/setup-guide.zh-CN.md)**
 
 關於 `Codex + WSL` 的官方現況、Clawd 目前實作的邊界、以及為什麼容易被誤解，見：**[Codex / WSL 說明（簡體中文）](docs/guides/codex-wsl-clarification.zh-CN.md)**
 
@@ -290,6 +293,34 @@ Clawd on Desk 是社群驅動的專案。歡迎提 Bug、提需求、提 PR —�
 <a href="https://github.com/cod3hulk"><img src="https://github.com/cod3hulk.png" width="50" style="border-radius:50%" /></a>
 <a href="https://github.com/lxgxhsy"><img src="https://github.com/lxgxhsy.png" width="50" style="border-radius:50%" /></a>
 <a href="https://github.com/rebootcrab-blip"><img src="https://github.com/rebootcrab-blip.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/zhaoxv210"><img src="https://github.com/zhaoxv210.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/serenNan"><img src="https://github.com/serenNan.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/IatomicreactorI"><img src="https://github.com/IatomicreactorI.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/quantai1314"><img src="https://github.com/quantai1314.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/Git-creat7"><img src="https://github.com/Git-creat7.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/undownding"><img src="https://github.com/undownding.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/chrono-meta"><img src="https://github.com/chrono-meta.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/Yike-Ye"><img src="https://github.com/Yike-Ye.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/xiaoshidefeng"><img src="https://github.com/xiaoshidefeng.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/yanguibao1997"><img src="https://github.com/yanguibao1997.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/JasonZH6600"><img src="https://github.com/JasonZH6600.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/V1staz"><img src="https://github.com/V1staz.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/royhuang91"><img src="https://github.com/royhuang91.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/Schlaflied"><img src="https://github.com/Schlaflied.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/KaiC5504"><img src="https://github.com/KaiC5504.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/jiaxuan1101"><img src="https://github.com/jiaxuan1101.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/kkirito16"><img src="https://github.com/kkirito16.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/200780381"><img src="https://github.com/200780381.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/Dxy2326"><img src="https://github.com/Dxy2326.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/lurui1997"><img src="https://github.com/lurui1997.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/JesmonX"><img src="https://github.com/JesmonX.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/chen86860"><img src="https://github.com/chen86860.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/LinYsssss"><img src="https://github.com/LinYsssss.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/He-wei-gui"><img src="https://github.com/He-wei-gui.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/liugou27"><img src="https://github.com/liugou27.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/YOOGOMJA"><img src="https://github.com/YOOGOMJA.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/anupamme"><img src="https://github.com/anupamme.png" width="50" style="border-radius:50%" /></a>
+<a href="https://github.com/anthonyonazure"><img src="https://github.com/anthonyonazure.png" width="50" style="border-radius:50%" /></a>
 
 ## 致謝
 

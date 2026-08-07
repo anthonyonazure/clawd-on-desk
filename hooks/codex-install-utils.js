@@ -1,7 +1,12 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { resolveNodeBin } = require("./server-config");
+const crypto = require("crypto");
+const {
+  APPIMAGE_HOOK_MARKER_FILE,
+  CODEX_WSL_INTEROP_ARG,
+  resolveNodeBin,
+} = require("./server-config");
 const {
   readJsonFile,
   writeJsonAtomic,
@@ -10,12 +15,14 @@ const {
   commandMatchesMarker,
   extractExistingNodeBin,
   formatNodeHookCommand,
-  removeMatchingCommandHooks,
 } = require("./json-utils");
 
-const DEFAULT_PARENT_DIR = path.join(os.homedir(), ".codex");
-const DEFAULT_CONFIG_PATH = path.join(DEFAULT_PARENT_DIR, "hooks.json");
-const DEFAULT_FEATURES_CONFIG = path.join(DEFAULT_PARENT_DIR, "config.toml");
+function resolveCodexHome(options = {}) {
+  if (typeof options.codexDir === "string" && options.codexDir.trim()) return options.codexDir.trim();
+  const env = options.env || process.env;
+  if (typeof env.CODEX_HOME === "string" && env.CODEX_HOME.trim()) return env.CODEX_HOME.trim();
+  return path.join(options.homeDir || os.homedir(), ".codex");
+}
 
 const CODEX_HOOK_EVENTS = [
   "SessionStart",
@@ -33,8 +40,7 @@ function timeoutForCodexEvent(event) {
 }
 
 function getCodexPaths(options = {}) {
-  const homeDir = options.homeDir || os.homedir();
-  const codexDir = options.codexDir || path.join(homeDir, ".codex");
+  const codexDir = resolveCodexHome(options);
   return {
     codexDir,
     hooksPath: options.hooksPath || path.join(codexDir, "hooks.json"),
@@ -53,6 +59,145 @@ function buildCodexHookCommand(nodeBin, hookScript, platform = process.platform)
   });
 }
 
+function windowsPathToWslPath(value) {
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(String(value || ""));
+  if (!match) return null;
+  return `/mnt/${match[1].toLowerCase()}/${match[2].replace(/\\/g, "/")}`;
+}
+
+// POSIX-side `command` for a hooks.json shared with WSL through CODEX_HOME
+// (#544). Codex on Windows prefers `commandWindows` (openai/codex#22159), so
+// `command` is only executed by POSIX shells — for a Windows-authored
+// hooks.json that means WSL. Run the WINDOWS node.exe via WSL interop rather
+// than a Linux node: the hook then lives in a Windows process whose
+// 127.0.0.1 is the Windows loopback, so events reach Clawd's server (which
+// binds 127.0.0.1 only) even in WSL's default NAT mode, where a Linux-side
+// process gets connection-refused. Requires WSL interop (on by default).
+// Env-var prefixes (`KEY=value node.exe ...`) do NOT cross the interop
+// boundary — never prepend env here; put env in commandWindows instead.
+function buildCodexHookPosixInteropCommand(nodeBin, hookScript) {
+  const wslNodeBin = windowsPathToWslPath(nodeBin);
+  // A UNC node path (\\server\share\node.exe or //server/share/node.exe)
+  // has no /mnt translation and a POSIX shell cannot exec the raw Windows
+  // form — fall back to bare node.exe resolved through the interop PATH.
+  const posixNodeBin = wslNodeBin
+    || (/^[\\/]{2}/.test(String(nodeBin))
+      ? "node.exe"
+      : (/\.exe$/i.test(String(nodeBin)) ? nodeBin : `${nodeBin}.exe`));
+  return `${formatNodeHookCommand(posixNodeBin, hookScript, { platform: "linux" })} ${CODEX_WSL_INTEROP_ARG}`;
+}
+
+function collectRelativeHookClosure(entryPath, options = {}) {
+  const fsApi = options.fs || fs;
+  const resolvedEntry = path.resolve(entryPath);
+  const rootDir = path.dirname(resolvedEntry);
+  const extraEntryPaths = Array.isArray(options.extraEntryPaths)
+    ? options.extraEntryPaths.map((value) => path.resolve(value))
+    : [];
+  const pending = [resolvedEntry, ...extraEntryPaths];
+  const files = new Map();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (files.has(current)) continue;
+    const relative = path.relative(rootDir, current);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error(`AppImage hook dependency escaped hooks directory: ${current}`);
+    }
+    const content = fsApi.readFileSync(current);
+    files.set(current, content);
+    const source = content.toString("utf8");
+    for (const match of source.matchAll(/require\(["'](\.\/[^"']+)["']\)/g)) {
+      const resolved = path.resolve(path.dirname(current), match[1]);
+      const candidate = path.extname(resolved) ? resolved : `${resolved}.js`;
+      const dependencyRelative = path.relative(rootDir, candidate);
+      if (dependencyRelative.startsWith("..") || path.isAbsolute(dependencyRelative)) {
+        throw new Error(`AppImage hook dependency escaped hooks directory: ${match[1]}`);
+      }
+      pending.push(candidate);
+    }
+  }
+  return { rootDir, files };
+}
+
+function materializeAppImageHookScript(entryPath, options = {}) {
+  const fsApi = options.fs || fs;
+  const appImagePath = String(options.appImagePath || "").trim();
+  if (!path.posix.isAbsolute(appImagePath)) {
+    throw new Error("AppImage hook installation requires an absolute APPIMAGE path");
+  }
+
+  const resolvedEntry = path.resolve(entryPath);
+  const { rootDir, files } = collectRelativeHookClosure(resolvedEntry, {
+    fs: fsApi,
+    extraEntryPaths: options.extraEntryPaths,
+  });
+  const ordered = [...files.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const hasher = crypto.createHash("sha256");
+  hasher.update(`${appImagePath}\0`);
+  for (const [filePath, content] of ordered) {
+    hasher.update(`${path.relative(rootDir, filePath)}\0`);
+    hasher.update(content);
+    hasher.update("\0");
+  }
+
+  const materializedRoot = options.materializedRoot
+    || path.join(options.homeDir || os.homedir(), ".clawd", "appimage-hooks");
+  const versionDir = path.join(materializedRoot, hasher.digest("hex").slice(0, 20));
+  const targetEntry = path.join(versionDir, path.relative(rootDir, resolvedEntry));
+  const markerPath = path.join(versionDir, APPIMAGE_HOOK_MARKER_FILE);
+  const isComplete = () => {
+    try {
+      if (String(fsApi.readFileSync(markerPath, "utf8")).trim() !== appImagePath) return false;
+      return ordered.every(([filePath]) =>
+        fsApi.existsSync(path.join(versionDir, path.relative(rootDir, filePath))));
+    } catch {
+      return false;
+    }
+  };
+  if (isComplete()) return targetEntry;
+
+  fsApi.mkdirSync(materializedRoot, { recursive: true, mode: 0o700 });
+  const stagingDir = `${versionDir}.tmp-${process.pid}-${Date.now()}`;
+  let replacedDir = null;
+  try {
+    fsApi.mkdirSync(stagingDir, { recursive: true, mode: 0o700 });
+    for (const [filePath, content] of ordered) {
+      const target = path.join(stagingDir, path.relative(rootDir, filePath));
+      fsApi.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+      fsApi.writeFileSync(target, content);
+    }
+    fsApi.writeFileSync(
+      path.join(stagingDir, APPIMAGE_HOOK_MARKER_FILE),
+      `${appImagePath}\n`,
+      { mode: 0o600 }
+    );
+    if (fsApi.existsSync(versionDir) && !isComplete()) {
+      replacedDir = `${versionDir}.replaced-${process.pid}-${Date.now()}`;
+      fsApi.renameSync(versionDir, replacedDir);
+    }
+    try {
+      fsApi.renameSync(stagingDir, versionDir);
+    } catch (err) {
+      // Another process may have won the same content-addressed install.
+      if (!isComplete()) {
+        if (replacedDir && !fsApi.existsSync(versionDir)) {
+          try { fsApi.renameSync(replacedDir, versionDir); } catch {}
+        }
+        throw err;
+      }
+      fsApi.rmSync(stagingDir, { recursive: true, force: true });
+    }
+    if (replacedDir) fsApi.rmSync(replacedDir, { recursive: true, force: true });
+  } catch (err) {
+    try {
+      fsApi.rmSync(stagingDir, { recursive: true, force: true });
+    } catch {}
+    throw err;
+  }
+  return targetEntry;
+}
+
 function quotePosixEnvValue(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
@@ -61,10 +206,14 @@ function quotePowerShellEnvValue(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function withCommandEnv(command, env, platform = process.platform) {
-  if (!env || typeof env !== "object") return command;
-  const entries = Object.entries(env)
+function filterCommandEnvEntries(env) {
+  if (!env || typeof env !== "object") return [];
+  return Object.entries(env)
     .filter(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && value !== undefined && value !== null);
+}
+
+function withCommandEnv(command, env, platform = process.platform) {
+  const entries = filterCommandEnvEntries(env);
   if (!entries.length) return command;
 
   if (platform === "win32") {
@@ -300,15 +449,119 @@ function ensureCodexHooksFeature(configPath, options = {}) {
   return { changed: true, warning: null };
 }
 
-function findCodexCommandHook(entry, marker) {
+// includeWindowsVariant widens the match to commandWindows. Registration
+// passes it only on win32 hosts: a POSIX host must never claim (and rewrite
+// the command of) an entry whose only Clawd trace is a leftover
+// commandWindows — that command could be a third-party hook. Uninstall, by
+// contrast, always matches both fields: removal must be complete on every
+// platform.
+function hookMatchesCodexMarker(hook, marker, includeWindowsVariant) {
+  return (
+    (typeof hook.command === "string" && commandMatchesMarker(hook.command, marker)) ||
+    (includeWindowsVariant === true
+      && typeof hook.commandWindows === "string"
+      && commandMatchesMarker(hook.commandWindows, marker))
+  );
+}
+
+function findCodexCommandHook(entry, marker, options = {}) {
   if (!entry || typeof entry !== "object") return null;
+  const includeWindowsVariant = options.includeWindowsVariant === true;
   const innerHooks = Array.isArray(entry.hooks) ? entry.hooks : [];
   for (const hook of innerHooks) {
     if (!hook || typeof hook !== "object") continue;
-    if (typeof hook.command === "string" && commandMatchesMarker(hook.command, marker)) return hook;
+    if (hookMatchesCodexMarker(hook, marker, includeWindowsVariant)) return hook;
   }
-  if (typeof entry.command === "string" && commandMatchesMarker(entry.command, marker)) return entry;
+  if (hookMatchesCodexMarker(entry, marker, includeWindowsVariant)) return entry;
   return null;
+}
+
+// Windows-host variant of extractExistingNodeBin: scans command AND
+// commandWindows, and only accepts Windows-form absolute paths (drive letter
+// or UNC). The POSIX `command` on a Windows host holds a derived /mnt/...
+// interop path — extracting that back as the node bin would corrupt
+// commandWindows on the next reconcile.
+function extractExistingWindowsNodeBin(settings, marker) {
+  const hooks = settings && settings.hooks;
+  if (!hooks || typeof hooks !== "object") return null;
+  const commands = [];
+  for (const entries of Object.values(hooks)) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object") continue;
+      const inner = Array.isArray(entry.hooks) ? entry.hooks : [entry];
+      for (const hook of inner) {
+        if (!hook || typeof hook !== "object") continue;
+        for (const cmd of [hook.commandWindows, hook.command]) {
+          if (typeof cmd === "string" && commandMatchesMarker(cmd, marker)) commands.push(cmd);
+        }
+      }
+    }
+  }
+  for (const cmd of commands) {
+    for (const match of cmd.matchAll(/"([^"]+)"/g)) {
+      const token = match[1];
+      if (!token || token.includes(marker)) continue;
+      if (/^[A-Za-z]:[\\/]/.test(token) || token.startsWith("\\\\")) return token;
+    }
+  }
+  return null;
+}
+
+// Local dual-field variant of removeMatchingCommandHooks: uninstall must
+// remove a hook when EITHER command or commandWindows carries the marker —
+// a hand-edited command must not shield a still-live commandWindows from
+// removal, on any platform. The shared helper only inspects command and
+// stays single-field for agents that never write commandWindows.
+function removeCodexCommandHooks(entries, predicate) {
+  if (!Array.isArray(entries)) return { entries, removed: 0, changed: false };
+  const hookMatches = (hook) =>
+    (typeof hook.command === "string" && predicate(hook.command))
+    || (typeof hook.commandWindows === "string" && predicate(hook.commandWindows));
+
+  let removed = 0;
+  let changed = false;
+  const nextEntries = [];
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") {
+      nextEntries.push(entry);
+      continue;
+    }
+
+    if (hookMatches(entry)) {
+      removed++;
+      changed = true;
+      continue;
+    }
+
+    if (!Array.isArray(entry.hooks)) {
+      nextEntries.push(entry);
+      continue;
+    }
+
+    const nextHooks = entry.hooks.filter((hook) => {
+      if (!hook || typeof hook !== "object") return true;
+      if (!hookMatches(hook)) return true;
+      removed++;
+      changed = true;
+      return false;
+    });
+
+    if (nextHooks.length === entry.hooks.length) {
+      nextEntries.push(entry);
+      continue;
+    }
+
+    if (
+      nextHooks.length === 0
+      && typeof entry.command !== "string"
+      && typeof entry.commandWindows !== "string"
+    ) continue;
+    nextEntries.push({ ...entry, hooks: nextHooks });
+  }
+
+  return { entries: nextEntries, removed, changed };
 }
 
 function registerCodexCommandHooks(options = {}) {
@@ -329,26 +582,74 @@ function registerCodexCommandHooks(options = {}) {
   });
   if (feature.warning) warnings.push(feature.warning);
 
-  const hookScript = asarUnpackedPath(path.resolve(__dirname, scriptName).replace(/\\/g, "/"));
   const settings = readJsonIfPresent(hooksPath, "hooks.json");
+  const hostPlatform = options.platform || process.platform;
+  const isWindowsHost = hostPlatform === "win32";
+  const processEnv = options.processEnv || process.env;
+  let hookScript = asarUnpackedPath(path.resolve(__dirname, scriptName).replace(/\\/g, "/"));
+  if (hostPlatform === "linux" && processEnv.APPIMAGE) {
+    const extraEntryPaths = scriptName === "codex-hook.js"
+      ? [asarUnpackedPath(path.resolve(__dirname, "auto-start.js").replace(/\\/g, "/"))]
+      : [];
+    hookScript = materializeAppImageHookScript(hookScript, {
+      appImagePath: processEnv.APPIMAGE,
+      homeDir: options.homeDir,
+      materializedRoot: options.materializedRoot,
+      extraEntryPaths,
+    }).replace(/\\/g, "/");
+  }
   const resolved = options.nodeBin !== undefined ? options.nodeBin : resolveNodeBin();
   const nodeBin = resolved
-    || extractExistingNodeBin(settings, marker, { nested: true })
+    || (isWindowsHost
+      ? extractExistingWindowsNodeBin(settings, marker)
+      : extractExistingNodeBin(settings, marker, { nested: true }))
     || "node";
-  const baseCommand = buildCodexHookCommand(
-    nodeBin,
-    hookScript,
-    options.platform || process.platform
-  );
+  const sshSecureRemote = options.remote === true
+    && (options.sshRemote === true || processEnv.CLAWD_SSH_REMOTE === "1");
+  const remoteSecureEnv = options.remote ? {
+    CLAWD_REMOTE: "1",
+    ...(sshSecureRemote ? {
+      CLAWD_SSH_REMOTE: "1",
+      ...(processEnv.CLAWD_REMOTE_IDENTITY_PATH
+        ? { CLAWD_REMOTE_IDENTITY_PATH: processEnv.CLAWD_REMOTE_IDENTITY_PATH }
+        : {}),
+      ...(processEnv.CLAWD_SSH_SECURE_MARKER_PATH
+        ? { CLAWD_SSH_SECURE_MARKER_PATH: processEnv.CLAWD_SSH_SECURE_MARKER_PATH }
+        : {}),
+      ...(processEnv.CLAWD_HOST_PREFIX_PATH
+        ? { CLAWD_HOST_PREFIX_PATH: processEnv.CLAWD_HOST_PREFIX_PATH }
+        : {}),
+      ...(processEnv.CLAWD_REMOTE_LAST_LOG_PATH
+        ? { CLAWD_REMOTE_LAST_LOG_PATH: processEnv.CLAWD_REMOTE_LAST_LOG_PATH }
+        : {}),
+      ...(processEnv.CODEX_HOME ? { CODEX_HOME: processEnv.CODEX_HOME } : {}),
+    } : {}),
+  } : {};
   const commandEnv = {
     ...(options.env || {}),
-    ...(options.remote ? { CLAWD_REMOTE: "1" } : {}),
+    ...remoteSecureEnv,
   };
-  const desiredCommand = withCommandEnv(
-    baseCommand,
-    commandEnv,
-    options.platform || process.platform
-  );
+  // On a Windows host, a WSL session may consume this hooks.json through a
+  // shared CODEX_HOME (#544). Codex resolves `commandWindows` on Windows and
+  // `command` on POSIX, so write both: keep the PowerShell form in
+  // commandWindows (unchanged from what `command` used to hold, so existing
+  // Windows installs keep their trusted_hash) and put a WSL-interop form in
+  // `command`. Note codex builds before openai/codex#22159 (2026-05) ignore
+  // commandWindows and would run the POSIX form on Windows.
+  const desiredCommandWindows = isWindowsHost
+    ? withCommandEnv(buildCodexHookCommand(nodeBin, hookScript, "win32"), commandEnv, "win32")
+    : null;
+  const desiredCommand = isWindowsHost
+    ? buildCodexHookPosixInteropCommand(nodeBin, hookScript)
+    : withCommandEnv(buildCodexHookCommand(nodeBin, hookScript, hostPlatform), commandEnv, hostPlatform);
+  // Gate the warning on the same filter withCommandEnv applies, so an env
+  // object that contributes nothing (invalid keys / nullish values) doesn't
+  // emit a false warning — repairCodexHooks escalates any warning to error.
+  if (isWindowsHost && filterCommandEnvEntries(commandEnv).length) {
+    warnings.push(
+      "Env vars don't cross the WSL interop boundary; they were applied to commandWindows only."
+    );
+  }
 
   if (!settings.hooks || typeof settings.hooks !== "object") settings.hooks = {};
 
@@ -369,15 +670,29 @@ function registerCodexCommandHooks(options = {}) {
     const desiredTimeout = timeoutForCodexEvent(event);
 
     for (const entry of arr) {
-      const hook = findCodexCommandHook(entry, marker);
+      const hook = findCodexCommandHook(entry, marker, { includeWindowsVariant: isWindowsHost });
       if (!hook) continue;
       found = true;
       if (hook.type !== "command") {
         hook.type = "command";
         stale = true;
       }
-      if (hook.command !== desiredCommand) {
+      // On win32 an entry can be claimed through commandWindows alone. If
+      // its command string no longer carries the marker, the user replaced
+      // it deliberately (e.g. interop unavailable in their WSL) — keep
+      // their fix and keep managing commandWindows only. Rewriting it here
+      // would recreate the exact "reconcile wipes my manual fix" loop #544
+      // reported.
+      const commandHandEdited = isWindowsHost
+        && typeof hook.command === "string"
+        && hook.command !== ""
+        && !commandMatchesMarker(hook.command, marker);
+      if (!commandHandEdited && hook.command !== desiredCommand) {
         hook.command = desiredCommand;
+        stale = true;
+      }
+      if (isWindowsHost && hook.commandWindows !== desiredCommandWindows) {
+        hook.commandWindows = desiredCommandWindows;
         stale = true;
       }
       if (hook.timeout !== desiredTimeout) {
@@ -397,9 +712,10 @@ function registerCodexCommandHooks(options = {}) {
       continue;
     }
 
-    arr.push({
-      hooks: [{ type: "command", command: desiredCommand, timeout: desiredTimeout }],
-    });
+    const newHook = isWindowsHost
+      ? { type: "command", command: desiredCommand, commandWindows: desiredCommandWindows, timeout: desiredTimeout }
+      : { type: "command", command: desiredCommand, timeout: desiredTimeout };
+    arr.push({ hooks: [newHook] });
     added++;
     changed = true;
   }
@@ -449,7 +765,7 @@ function unregisterCodexCommandHooks(options = {}) {
   for (const event of events) {
     const arr = settings.hooks[event];
     if (!Array.isArray(arr)) continue;
-    const result = removeMatchingCommandHooks(arr, (command) =>
+    const result = removeCodexCommandHooks(arr, (command) =>
       markers.some((marker) => commandMatchesMarker(command, marker))
     );
     if (result.changed) {
@@ -469,18 +785,35 @@ function unregisterCodexCommandHooks(options = {}) {
 }
 
 module.exports = {
-  DEFAULT_PARENT_DIR,
-  DEFAULT_CONFIG_PATH,
-  DEFAULT_FEATURES_CONFIG,
   CODEX_HOOK_EVENTS,
+  CODEX_WSL_INTEROP_ARG,
   CODEX_HOOKS_FEATURE_KEY,
   LEGACY_CODEX_HOOKS_FEATURE_KEY,
   buildCodexHookCommand,
+  buildCodexHookPosixInteropCommand,
+  collectRelativeHookClosure,
   ensureCodexHooksFeature,
+  extractExistingWindowsNodeBin,
   findCodexCommandHook,
   parseTomlTableHeader,
+  materializeAppImageHookScript,
   registerCodexCommandHooks,
   timeoutForCodexEvent,
   unregisterCodexCommandHooks,
+  windowsPathToWslPath,
   withCommandEnv,
+  resolveCodexHome,
 };
+
+Object.defineProperty(module.exports, "DEFAULT_PARENT_DIR", {
+  enumerable: true,
+  get() { return resolveCodexHome(); },
+});
+Object.defineProperty(module.exports, "DEFAULT_CONFIG_PATH", {
+  enumerable: true,
+  get() { return path.join(resolveCodexHome(), "hooks.json"); },
+});
+Object.defineProperty(module.exports, "DEFAULT_FEATURES_CONFIG", {
+  enumerable: true,
+  get() { return path.join(resolveCodexHome(), "config.toml"); },
+});

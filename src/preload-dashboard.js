@@ -22,7 +22,12 @@ contextBridge.exposeInMainWorld("dashboardAPI", {
   getI18n: () => ipcRenderer.invoke("dashboard:get-i18n"),
   focusSession: (sessionId) => ipcRenderer.send("dashboard:focus-session", sessionId),
   hideSession: (sessionId) => ipcRenderer.invoke("dashboard:hide-session", sessionId),
+  openSessionFolder: (sessionId) => ipcRenderer.invoke("dashboard:open-session-folder", sessionId),
   setSessionAlias: (payload) => ipcRenderer.invoke("dashboard:set-session-alias", payload),
+  setSessionAutomationOverride: (payload) =>
+    ipcRenderer.invoke("dashboard:set-session-automation", payload),
+  clearSessionAutomationGrant: (payload) =>
+    ipcRenderer.invoke("dashboard:clear-session-automation-grant", payload),
   ackCompletion: (sessionId) => ipcRenderer.invoke("session:ack-completion", sessionId),
   onSessionSnapshot: (cb) => {
     if (typeof cb !== "function") return () => {};

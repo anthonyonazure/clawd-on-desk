@@ -5,11 +5,51 @@ const assert = require("node:assert");
 
 const {
   deriveSessionBadge,
+  deriveSourceInfo,
   isSessionInProgress,
   buildSessionSnapshot,
   getActiveSessionAliasKeys,
   sessionSnapshotSignature,
+  sessionDisplayTitle,
 } = require("../src/state-session-snapshot");
+const { makeSessionKey } = require("../src/session-key");
+const { sessionAliasKey } = require("../src/session-alias");
+
+describe("deriveSourceInfo", () => {
+  it("derives WSL source from the wsl: host prefix", () => {
+    assert.deepStrictEqual(deriveSourceInfo("wsl:Ubuntu"), {
+      sourceType: "wsl",
+      sourceLabel: "Ubuntu",
+      displayLabel: "WSL: Ubuntu",
+    });
+  });
+
+  it("falls back to a stable label for a bare wsl: prefix", () => {
+    assert.deepStrictEqual(deriveSourceInfo("wsl:"), {
+      sourceType: "wsl",
+      sourceLabel: "unknown",
+      displayLabel: "WSL: unknown",
+    });
+  });
+
+  it("treats any other non-local host as ssh", () => {
+    assert.deepStrictEqual(deriveSourceInfo("devbox"), {
+      sourceType: "ssh",
+      sourceLabel: "devbox",
+      displayLabel: "devbox",
+    });
+  });
+
+  it("treats empty, null, and 'local' hosts as local", () => {
+    for (const host of ["", null, undefined, "local"]) {
+      assert.deepStrictEqual(deriveSourceInfo(host), {
+        sourceType: "local",
+        sourceLabel: "",
+        displayLabel: "",
+      });
+    }
+  });
+});
 
 const STATE_PRIORITY = {
   error: 8,
@@ -35,6 +75,68 @@ function session(state, overrides = {}) {
   };
 }
 
+describe("startup-recovered session snapshots", () => {
+  it("exposes the marker, disables focus, and includes marker changes in the signature", () => {
+    const recovered = buildSessionSnapshot(new Map([
+      ["real-session", session("working", { sourcePid: 123, startupRecovered: true })],
+    ]), { statePriority: STATE_PRIORITY });
+    const live = buildSessionSnapshot(new Map([
+      ["real-session", session("working", { sourcePid: 123 })],
+    ]), { statePriority: STATE_PRIORITY });
+
+    assert.strictEqual(recovered.sessions[0].startupRecovered, true);
+    assert.strictEqual(recovered.sessions[0].canFocus, false);
+    assert.strictEqual(recovered.sessions[0].focusTarget, null);
+    assert.strictEqual(live.sessions[0].startupRecovered, false);
+    assert.notStrictEqual(sessionSnapshotSignature(recovered), sessionSnapshotSignature(live));
+  });
+});
+
+describe("remote profile action ids", () => {
+  it("keeps canonical ids for actions while rendering raw ids and profile-scoped aliases", () => {
+    const rawSessionId = "same-visible-id";
+    const aId = makeSessionKey({ profileId: "profile-a", rawSessionId });
+    const bId = makeSessionKey({ profileId: "profile-b", rawSessionId });
+    const aliases = {
+      [sessionAliasKey("shared-host", "codex", rawSessionId, { profileId: "profile-a" })]: {
+        title: "Alpha",
+        updatedAt: 1000,
+      },
+      [sessionAliasKey("shared-host", "codex", rawSessionId, { profileId: "profile-b" })]: {
+        title: "Beta",
+        updatedAt: 1000,
+      },
+    };
+    const snapshot = buildSessionSnapshot(new Map([
+      [aId, session("working", {
+        profileId: "profile-a",
+        rawSessionId,
+        host: "shared-host",
+        agentId: "codex",
+      })],
+      [bId, session("thinking", {
+        profileId: "profile-b",
+        rawSessionId,
+        host: "shared-host",
+        agentId: "codex",
+      })],
+    ]), {
+      statePriority: STATE_PRIORITY,
+      sessionAliases: aliases,
+    });
+
+    assert.deepStrictEqual(snapshot.sessions.map((entry) => entry.id).sort(), [aId, bId].sort());
+    assert.deepStrictEqual(snapshot.sessions.map((entry) => entry.rawSessionId), [
+      rawSessionId,
+      rawSessionId,
+    ]);
+    assert.deepStrictEqual(
+      Object.fromEntries(snapshot.sessions.map((entry) => [entry.profileId, entry.displayTitle])),
+      { "profile-a": "Alpha", "profile-b": "Beta" },
+    );
+  });
+});
+
 describe("isSessionInProgress state mapping", () => {
   it("treats persisted running states as in-progress and idle/sleeping/headless as not", () => {
     assert.strictEqual(isSessionInProgress(session("working")), true);
@@ -52,6 +154,33 @@ describe("isSessionInProgress state mapping", () => {
   it("returns false for nullish sessions", () => {
     assert.strictEqual(isSessionInProgress(null), false);
     assert.strictEqual(isSessionInProgress(undefined), false);
+  });
+});
+
+describe("sessionDisplayTitle cwd fallback", () => {
+  it("falls back to path.basename(cwd) for normal project paths", () => {
+    assert.strictEqual(
+      sessionDisplayTitle("qoderwork:abc123", session("working", { cwd: "/home/me/projects/myapp" })),
+      "myapp"
+    );
+  });
+
+  it("skips QoderWork internal workspace cwds so the HUD never shows a raw workspace id", () => {
+    assert.strictEqual(
+      sessionDisplayTitle("qoderwork:abc123", session("working", { agentId: "qoderwork", cwd: "/Users/me/.qoderwork/workspace/mqgw60jiigjsjcid" })),
+      "qoderw.."
+    );
+    assert.strictEqual(
+      sessionDisplayTitle("qoderwork:abc123", session("working", { agentId: "qoderwork", cwd: "C:\\Users\\me\\.qoderwork\\workspace\\abc123" })),
+      "qoderw.."
+    );
+  });
+
+  it("keeps the cwd basename for non-QoderWork agents even inside a QoderWork workspace dir", () => {
+    assert.strictEqual(
+      sessionDisplayTitle("claude:xyz789", session("working", { agentId: "claude-code", cwd: "/Users/me/.qoderwork/workspace/mqgw60jiigjsjcid" })),
+      "mqgw60jiigjsjcid"
+    );
   });
 });
 
@@ -83,6 +212,78 @@ describe("state-session-snapshot badges", () => {
 });
 
 describe("state-session-snapshot builder", () => {
+  it("derives session automation fields and keeps hidden-session grants revocable as orphans", () => {
+    const records = [
+      {
+        agentId: "claude-code",
+        sessionId: "eligible",
+        mode: "auto-tools",
+        grantId: "g-current",
+        displayLabel: "project",
+        createdAt: 10,
+      },
+      {
+        agentId: "claude-code",
+        sessionId: "hidden",
+        mode: "off",
+        grantId: "g-orphan",
+        displayLabel: "hidden project",
+        createdAt: 20,
+      },
+      {
+        agentId: "opencode",
+        sessionId: "blocked",
+        mode: "off",
+        grantId: "g-blocked",
+        displayLabel: "blocked project",
+        createdAt: 30,
+      },
+    ];
+    const snapshot = buildSessionSnapshot(new Map([
+      ["eligible", session("working", {
+        agentId: "claude-code",
+        sessionAutomationIdentity: { eligible: true, reason: "verified" },
+      })],
+      ["blocked", session("working", {
+        agentId: "opencode",
+        sessionAutomationIdentity: { eligible: false, reason: "association-unverified" },
+      })],
+    ]), {
+      permissionAutomationMode: "off",
+      sessionAutomationRecords: records,
+    });
+    const byId = new Map(snapshot.sessions.map((entry) => [entry.id, entry]));
+    assert.deepStrictEqual({
+      mode: byId.get("eligible").sessionAutomationMode,
+      grantId: byId.get("eligible").sessionAutomationGrantId,
+      effective: byId.get("eligible").sessionAutomationEffectiveMode,
+      canConfigure: byId.get("eligible").canConfigureSessionAutomation,
+      disabledReason: byId.get("eligible").sessionAutomationDisabledReason,
+    }, {
+      mode: "auto-tools",
+      grantId: "g-current",
+      effective: "auto-tools",
+      canConfigure: true,
+      disabledReason: null,
+    });
+    assert.equal(byId.get("blocked").canConfigureSessionAutomation, false);
+    assert.equal(byId.get("blocked").sessionAutomationDisabledReason, "association-unverified");
+    assert.equal(
+      byId.get("blocked").sessionAutomationEffectiveMode,
+      "off",
+      "an existing record remains the displayed effective mode even if the identity later becomes ineligible"
+    );
+    assert.deepStrictEqual(snapshot.sessionAutomationOrphans, [{
+      agentId: "claude-code",
+      sessionId: "hidden",
+      mode: "off",
+      sessionAutomationGrantId: "g-orphan",
+      displayLabel: "hidden project",
+      createdAt: 20,
+    }]);
+    assert.match(sessionSnapshotSignature(snapshot), /g-orphan/);
+  });
+
   it("builds ordered dashboard/menu groups and HUD summary with injected deps", () => {
     const sessions = new Map([
       ["old-working", session("working", {
@@ -118,8 +319,8 @@ describe("state-session-snapshot builder", () => {
     assert.deepStrictEqual(snapshot.orderedIds, ["latest-remote", "error-local", "old-working"]);
     assert.deepStrictEqual(snapshot.menuOrderedIds, ["error-local", "old-working", "latest-remote"]);
     assert.deepStrictEqual(snapshot.groups, [
-      { host: "", ids: ["error-local", "old-working"] },
-      { host: "remote-box", ids: ["latest-remote"] },
+      { host: "", ids: ["error-local", "old-working"], displayHost: "" },
+      { host: "remote-box", ids: ["latest-remote"], displayHost: "remote-box" },
     ]);
     assert.strictEqual(snapshot.hudTotalNonIdle, 2);
     assert.strictEqual(snapshot.hudLastSessionId, "error-local");
@@ -195,18 +396,24 @@ describe("state-session-snapshot builder", () => {
     const snapshot = buildSessionSnapshot(new Map([
       ["terminal", session("working", { sourcePid: 123 })],
       ["webui", session("working", { sourcePid: 456, platform: "webui" })],
+      ["remote-orca", session("working", {
+        host: "remote-box",
+        orcaPaneKey: "tab-remote:leaf-remote",
+      })],
       ["codex:019e115a-4df2-7ed0-b90e-8e6345aca777", session("working", {
         agentId: "codex",
-        codexOriginator: "Codex Desktop",
+        codexOriginator: "codex_work_desktop",
         codexSource: "vscode",
       })],
-    ]));
+    ]), { focusHostPlatform: "darwin" });
 
     const byId = new Map(snapshot.sessions.map((entry) => [entry.id, entry]));
     assert.strictEqual(byId.get("terminal").canFocus, true);
     assert.deepStrictEqual(byId.get("terminal").focusTarget, { type: "terminal", url: null });
     assert.strictEqual(byId.get("webui").canFocus, false);
     assert.strictEqual(byId.get("webui").focusTarget, null);
+    assert.strictEqual(byId.get("remote-orca").canFocus, true);
+    assert.deepStrictEqual(byId.get("remote-orca").focusTarget, { type: "terminal", url: null });
     assert.strictEqual(byId.get("codex:019e115a-4df2-7ed0-b90e-8e6345aca777").canFocus, true);
     assert.deepStrictEqual(byId.get("codex:019e115a-4df2-7ed0-b90e-8e6345aca777").focusTarget, {
       type: "codex-thread",
@@ -219,7 +426,7 @@ describe("state-session-snapshot builder", () => {
     const snapshot = buildSessionSnapshot(new Map([
       ["codex:019e115a-4df2-7ed0-b90e-8e6345aca777", session("working", {
         agentId: "codex",
-        codexOriginator: "Codex Desktop",
+        codexOriginator: "codex_work_desktop",
         sourcePid: 123,
       })],
       ["codex:019e115b-4df2-7ed0-b90e-8e6345aca777", session("working", {
@@ -292,23 +499,32 @@ describe("state-session-snapshot builder", () => {
   });
 
   it("applies aliases, Codex thread names, and Kiro cwd-scoped alias keys", () => {
+    const claudeId = makeSessionKey({ profileId: "local", rawSessionId: "claude-local" });
+    const codexId = makeSessionKey({ profileId: "local", rawSessionId: "codex:abc" });
+    const kiroId = makeSessionKey({ profileId: "local", rawSessionId: "default" });
     const sessions = new Map([
-      ["claude-local", session("working", {
+      [claudeId, session("working", {
         updatedAt: 3000,
         cwd: "/repo/a",
         agentId: "claude-code",
+        profileId: "local",
+        rawSessionId: "claude-local",
         sessionTitle: "Raw title",
       })],
-      ["codex:abc", session("thinking", {
+      [codexId, session("thinking", {
         updatedAt: 2000,
         cwd: "/repo/b",
         agentId: "codex",
+        profileId: "local",
+        rawSessionId: "codex:abc",
         sessionTitle: "Auto Summary",
       })],
-      ["default", session("working", {
+      [kiroId, session("working", {
         updatedAt: 1000,
         cwd: "/repo/c",
         agentId: "kiro-cli",
+        profileId: "local",
+        rawSessionId: "default",
       })],
     ]);
 
@@ -322,11 +538,11 @@ describe("state-session-snapshot builder", () => {
       readCodexThreadName: (id) => id === "codex:abc" ? "Thread name" : null,
     });
 
-    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "claude-local").displayTitle, "Claude review");
-    const codex = snapshot.sessions.find((entry) => entry.id === "codex:abc");
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === claudeId).displayTitle, "Claude review");
+    const codex = snapshot.sessions.find((entry) => entry.id === codexId);
     assert.strictEqual(codex.sessionTitle, "Thread name");
     assert.strictEqual(codex.displayTitle, "Thread name");
-    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "default").displayTitle, "Kiro repo C");
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === kiroId).displayTitle, "Kiro repo C");
 
     assert.deepStrictEqual(
       [...getActiveSessionAliasKeys(sessions)].sort(),
@@ -356,6 +572,105 @@ describe("state-session-snapshot builder", () => {
       percent: 1,
       source: "claude",
     });
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(snapshot.sessions[0], "contextUsageOrigin"),
+      false,
+      "source authority is internal state, not renderer-facing data",
+    );
+  });
+
+  it("ignores internal context authority when computing the renderer snapshot signature", () => {
+    const opts = { statePriority: STATE_PRIORITY };
+    const transcript = buildSessionSnapshot(new Map([
+      ["s1", session("working", {
+        contextUsage: { used: 1000, limit: 200000, percent: 1, source: "claude" },
+        contextUsageOrigin: "claude-transcript",
+      })],
+    ]), opts);
+    const statusline = buildSessionSnapshot(new Map([
+      ["s1", session("working", {
+        contextUsage: { used: 1000, limit: 200000, percent: 1, source: "claude" },
+        contextUsageOrigin: "claude-statusline",
+      })],
+    ]), opts);
+
+    assert.strictEqual(sessionSnapshotSignature(transcript), sessionSnapshotSignature(statusline));
+  });
+
+  // Account quota is session-independent (src/state-account-quota.js): it
+  // enters the snapshot as a top-level list injected by the caller, never
+  // as a per-session field.
+  it("passes the injected accountQuota through and defaults it to empty", () => {
+    const accountQuota = [{
+      host: null,
+      claudeQuota: {
+        group: { claudeWeekly: { usedPercent: 41, resetAt: 1738831180000 } },
+        updatedAt: 1738000000000,
+      },
+    }];
+    const withQuota = buildSessionSnapshot(new Map(), { statePriority: STATE_PRIORITY, accountQuota });
+    const withoutQuota = buildSessionSnapshot(new Map(), { statePriority: STATE_PRIORITY });
+
+    assert.deepStrictEqual(withQuota.accountQuota, accountQuota);
+    assert.deepStrictEqual(withoutQuota.accountQuota, []);
+    // Cloned at the boundary: a caller mutating the array it passed in must
+    // not reach into the completed snapshot.
+    accountQuota[0].claudeQuota.group.claudeWeekly.usedPercent = 99;
+    assert.strictEqual(withQuota.accountQuota[0].claudeQuota.group.claudeWeekly.usedPercent, 41);
+  });
+
+  it("snapshot signature tracks accountQuota groups + lastSeenAt, not updatedAt stamps", () => {
+    const base = { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null };
+    const group = { claudeWeekly: { usedPercent: 41 } };
+    const a = buildSessionSnapshot(new Map(), {
+      ...base,
+      accountQuota: [{ host: "pi", claudeQuota: { group, updatedAt: 1, lastSeenAt: 60000 } }],
+    });
+    const sameGroupNewStamp = buildSessionSnapshot(new Map(), {
+      ...base,
+      accountQuota: [{ host: "pi", claudeQuota: { group, updatedAt: 2, lastSeenAt: 60000 } }],
+    });
+    const changedGroup = buildSessionSnapshot(new Map(), {
+      ...base,
+      accountQuota: [{ host: "pi", claudeQuota: { group: { claudeWeekly: { usedPercent: 55 } }, updatedAt: 2, lastSeenAt: 60000 } }],
+    });
+    const newerSeen = buildSessionSnapshot(new Map(), {
+      ...base,
+      accountQuota: [{ host: "pi", claudeQuota: { group, updatedAt: 1, lastSeenAt: 120000 } }],
+    });
+
+    assert.strictEqual(
+      sessionSnapshotSignature(a),
+      sessionSnapshotSignature(sameGroupNewStamp),
+      "a bare stamp change must not re-broadcast"
+    );
+    assert.notStrictEqual(sessionSnapshotSignature(a), sessionSnapshotSignature(changedGroup));
+    // lastSeenAt is minute-quantized in the store snapshot; when it moves,
+    // the freshness labels changed and the broadcast must go out.
+    assert.notStrictEqual(sessionSnapshotSignature(a), sessionSnapshotSignature(newerSeen));
+  });
+
+  it("snapshot signature tracks Spark group and lastSeenAt changes", () => {
+    const base = { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null };
+    const build = (usedPercent, updatedAt, lastSeenAt) => buildSessionSnapshot(new Map(), {
+      ...base,
+      accountQuota: [{
+        host: null,
+        codexSparkQuota: {
+          group: { codexWeekly: { usedPercent, windowMinutes: 10080 } },
+          updatedAt,
+          lastSeenAt,
+        },
+      }],
+    });
+    const original = build(7, 1, 60000);
+    const stampOnly = build(7, 2, 60000);
+    const changedValue = build(9, 2, 60000);
+    const changedSeen = build(7, 1, 120000);
+
+    assert.strictEqual(sessionSnapshotSignature(original), sessionSnapshotSignature(stampOnly));
+    assert.notStrictEqual(sessionSnapshotSignature(original), sessionSnapshotSignature(changedValue));
+    assert.notStrictEqual(sessionSnapshotSignature(original), sessionSnapshotSignature(changedSeen));
   });
 
   it("marks detached ended idle sessions hidden from HUD only when cleanup is enabled and pid is dead", () => {
@@ -411,7 +726,44 @@ describe("state-session-snapshot builder", () => {
     assert.strictEqual(snapshot.hudTotalNonIdle, 1);
     assert.strictEqual(snapshot.hudLastSessionId, "codex:new");
     assert.deepStrictEqual(snapshot.orderedIds, ["codex:new", "codex:old"]);
-    assert.deepStrictEqual(snapshot.groups, [{ host: "", ids: ["codex:new", "codex:old"] }]);
+    assert.deepStrictEqual(snapshot.groups, [{ host: "", ids: ["codex:new", "codex:old"], displayHost: "" }]);
+  });
+
+  it("keeps Codex Desktop sessions that share one agent process visible in HUD", () => {
+    const snapshot = buildSessionSnapshot(new Map([
+      ["codex:desktop-a", session("working", {
+        agentId: "codex",
+        agentPid: 4242,
+        codexOriginator: "codex_work_desktop",
+        updatedAt: 1000,
+        cwd: "/repo/a",
+      })],
+      ["codex:desktop-b", session("thinking", {
+        agentId: "codex",
+        agentPid: 4242,
+        codexOriginator: "codex_work_desktop",
+        updatedAt: 2000,
+        cwd: "/repo/b",
+      })],
+      ["codex:guardian", session("working", {
+        agentId: "codex",
+        agentPid: 4242,
+        codexOriginator: "codex_work_desktop",
+        headless: true,
+        updatedAt: 3000,
+        cwd: "/repo/b",
+      })],
+    ]), {
+      statePriority: STATE_PRIORITY,
+      getAgentIconUrl: () => null,
+    });
+
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "codex:desktop-a").hiddenFromHud, false);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "codex:desktop-b").hiddenFromHud, false);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "codex:guardian").headless, true);
+    assert.strictEqual(snapshot.sessions.find((entry) => entry.id === "codex:guardian").hiddenFromHud, false);
+    assert.strictEqual(snapshot.hudTotalNonIdle, 2);
+    assert.strictEqual(snapshot.hudLastSessionId, "codex:desktop-b");
   });
 
   it("snapshot signatures include visible fields but ignore icon URL churn", () => {
@@ -448,6 +800,30 @@ describe("state-session-snapshot builder", () => {
 
     assert.strictEqual(sessionSnapshotSignature(base), sessionSnapshotSignature(sameExceptIcon));
     assert.notStrictEqual(sessionSnapshotSignature(base), sessionSnapshotSignature(differentTitle));
+  });
+
+  // #590 B2 — metadataUpdatedAt is a display-arbitration freshness stamp: it
+  // must reach renderers via the snapshot but stay out of the signature (like
+  // updatedAt), so stamping it can never re-trigger a broadcast by itself.
+  it("entry carries metadataUpdatedAt but the signature ignores it", () => {
+    const opts = { statePriority: STATE_PRIORITY, getAgentIconUrl: () => "icon:a" };
+    const stamped = buildSessionSnapshot(new Map([
+      ["s1", session("working", {
+        updatedAt: 1000,
+        metadataUpdatedAt: 5000,
+        recentEvents: [{ event: "PreToolUse", state: "working", at: 900 }],
+      })],
+    ]), opts);
+    const restamped = buildSessionSnapshot(new Map([
+      ["s1", session("working", {
+        updatedAt: 1000,
+        metadataUpdatedAt: 9000,
+        recentEvents: [{ event: "PreToolUse", state: "working", at: 900 }],
+      })],
+    ]), opts);
+
+    assert.strictEqual(stamped.sessions[0].metadataUpdatedAt, 5000);
+    assert.strictEqual(sessionSnapshotSignature(stamped), sessionSnapshotSignature(restamped));
   });
 
   // ── PR2: requiresCompletionAck exposure ──
@@ -491,5 +867,24 @@ describe("state-session-snapshot builder", () => {
     const base = buildSessionSnapshot(baseSessions, { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
     const flagged = buildSessionSnapshot(flaggedSessions, { statePriority: STATE_PRIORITY, getAgentIconUrl: () => null });
     assert.notStrictEqual(sessionSnapshotSignature(base), sessionSnapshotSignature(flagged));
+  });
+
+  it("exposes a resolved custom agent name and includes it in the snapshot signature", () => {
+    const sessions = new Map([
+      ["custom-session", session("working", { agentId: "custom-nova-0123456789ab" })],
+    ]);
+    const nova = buildSessionSnapshot(sessions, {
+      statePriority: STATE_PRIORITY,
+      getAgentIconUrl: () => null,
+      resolveAgentDisplayName: () => "Nova AI",
+    });
+    const renamed = buildSessionSnapshot(sessions, {
+      statePriority: STATE_PRIORITY,
+      getAgentIconUrl: () => null,
+      resolveAgentDisplayName: () => "Nova Desktop",
+    });
+
+    assert.strictEqual(nova.sessions[0].agentName, "Nova AI");
+    assert.notStrictEqual(sessionSnapshotSignature(nova), sessionSnapshotSignature(renamed));
   });
 });

@@ -6,8 +6,9 @@
 //   • Before moving the window, the visual state switches to "roam" (which
 //     falls back to idle SVG for themes without a dedicated roam animation).
 //     This prevents the "idle pet dragged across the desktop" regression.
-//   • Movement goes through applyPetWindowPosition every frame so virtual bounds,
-//     hit window, HUD, and anchored surfaces stay in sync with the pet.
+//   • Movement goes through applyPetWindowBounds every frame — anchored to a
+//     size captured once at walk start (#569) — so virtual bounds, hit window,
+//     HUD, and anchored surfaces stay in sync with the pet.
 //   • Each animation step re-checks isRoamAllowed() so a state change to working /
 //     notification / permission cancels the roam immediately — no "pet drifting while
 //     working" regression.
@@ -15,33 +16,68 @@
 //     roams use ROAM_BETWEEN_DELAY_MS (4s).
 //   • When the state changes away from idle/roam (detected in tick or step),
 //     firstRoam is reset so the next idle entry waits the full 8s delay.
+//   • Optional roam fence (#810): when ctx.roamFence (src/roam-fence.js)
+//     reports an active fence, targets are confined to that sub-rectangle of
+//     the work area. Without an active fence every code path below behaves
+//     exactly as it did before the fence existed.
 
-const ROAM_IDLE_DELAY_MS = 8000;     // first roam after entering idle
-const ROAM_BETWEEN_DELAY_MS = 4000;  // delay between consecutive roams
-const ROAM_SPEED_PX_PER_MS = 0.08;   // 80px/s — slower than mini crabwalk (120px/s)
+const ROAM_IDLE_DELAY_MS = 8000; // first roam after entering idle
+const ROAM_BETWEEN_DELAY_MS = 4000; // delay between consecutive roams
+const ROAM_SPEED_PX_PER_MS = 0.08; // 80px/s — slower than mini crabwalk (120px/s)
 const ROAM_MIN_DIST = 100;
 const ROAM_MARGIN_RATIO = 0.15;
 const ROAM_FRAME_MS = 16;
+const ROAM_TARGET_ATTEMPTS = 8;
 
 module.exports = function initRoam(ctx) {
   let enabled = false;
+  let constrainAxis = false;
   let roamActive = false;
   let roamAnimTimer = null;
   let roamPauseTimer = null;
-  let firstRoam = true;  // true until the first roam fires after idle entry
+  let firstRoam = true; // true until the first roam fires after idle entry
 
   function cleanupTimers() {
-    if (roamAnimTimer) { clearTimeout(roamAnimTimer); roamAnimTimer = null; }
-    if (roamPauseTimer) { clearTimeout(roamPauseTimer); roamPauseTimer = null; }
+    if (roamAnimTimer) {
+      clearTimeout(roamAnimTimer);
+      roamAnimTimer = null;
+    }
+    if (roamPauseTimer) {
+      clearTimeout(roamPauseTimer);
+      roamPauseTimer = null;
+    }
+  }
+
+  // Issue #690 plan §4.3.10's roam protection-period release point. Roam's
+  // per-frame applyPetWindowBounds() (ROAM_FRAME_MS=16) is a continuous
+  // native-write period the reconcile state machine must not fight — every
+  // exit from that period (walk finishing naturally below, or being
+  // cancelled) must tell the runtime so a reconcile that was only "marked
+  // dirty" during the walk gets its one terminal pass. No-op when the
+  // runtime hasn't wired this in (e.g. plain unit tests of roam.js alone).
+  function notifyRoamProtectionReleased() {
+    if (typeof ctx.releaseReconcileProtection === "function")
+      ctx.releaseReconcileProtection();
   }
 
   function isRoamAllowed() {
     if (!enabled) return false;
+    if (ctx.dragLocked) return false;
     if (ctx.getMiniMode && ctx.getMiniMode()) return false;
     const state = ctx.getCurrentState ? ctx.getCurrentState() : "idle";
     // Allow roaming when idle (about to start) or already roaming (mid-animation)
     if (state !== "idle" && state !== "roam") return false;
     if (ctx.miniTransitioning) return false;
+    // #640: while the user is typing into a bubble's text field (macOS IME
+    // editing), the pet must hold still — a wandering pet either drags the
+    // bubble along (followPet anchoring) or walks over the box being typed
+    // into. Checked per-frame like the state gate, so an editing start
+    // cancels a walk mid-stride.
+    if (
+      typeof ctx.isImeEditingActive === "function" &&
+      ctx.isImeEditingActive()
+    )
+      return false;
     return true;
   }
 
@@ -50,67 +86,341 @@ module.exports = function initRoam(ctx) {
     if (!bounds) return null;
     const wa = ctx.getNearestWorkArea(
       bounds.x + bounds.width / 2,
-      bounds.y + bounds.height / 2
+      bounds.y + bounds.height / 2,
     );
     if (!wa) return null;
+    // #810: one frozen size snapshot drives the whole walk — fence geometry,
+    // random and fallback targets, screen clamping, and every animation frame.
+    // Planning with live bounds while animating with the keep-size effective
+    // size (#569/#408) lets a target that fits on paper place the real window
+    // outside the fence, so the snapshot is resolved here, before target
+    // selection, and handed to animateTo() on the returned target.
+    const effectiveSize =
+      typeof ctx.getEffectiveCurrentPixelSize === "function"
+        ? ctx.getEffectiveCurrentPixelSize()
+        : null;
+    const petW =
+      effectiveSize &&
+      Number.isFinite(effectiveSize.width) &&
+      effectiveSize.width > 0
+        ? effectiveSize.width
+        : bounds.width;
+    const petH =
+      effectiveSize &&
+      Number.isFinite(effectiveSize.height) &&
+      effectiveSize.height > 0
+        ? effectiveSize.height
+        : bounds.height;
+    const size = { width: petW, height: petH };
     const marginX = Math.round(wa.width * ROAM_MARGIN_RATIO);
     const marginY = Math.round(wa.height * ROAM_MARGIN_RATIO);
     let xMin = wa.x + marginX;
-    let xMax = wa.x + wa.width - bounds.width - marginX;
+    let xMax = wa.x + wa.width - petW - marginX;
     let yMin = wa.y + marginY;
-    let yMax = wa.y + wa.height - bounds.height - marginY;
-    // Optional roam fence from ~/.clawd/roam-area.json —
-    // { enabled, left, top, right, bottom } as 0..1 fractions of the work area.
-    // Read per pick so edits apply without restarting the app.
-    try {
-      const fenceRaw = require("fs").readFileSync(
-        require("path").join(require("os").homedir(), ".clawd", "roam-area.json"),
-        "utf8"
-      );
-      const fence = JSON.parse(fenceRaw);
-      if (fence && fence.enabled !== false) {
-        const frac = (v, d) => {
-          const n = Number(v);
-          return Number.isFinite(n) ? Math.min(Math.max(n, 0), 1) : d;
-        };
-        xMin = Math.max(xMin, wa.x + Math.round(wa.width * frac(fence.left, 0)));
-        xMax = Math.min(xMax, wa.x + Math.round(wa.width * frac(fence.right, 1)) - bounds.width);
-        yMin = Math.max(yMin, wa.y + Math.round(wa.height * frac(fence.top, 0)));
-        yMax = Math.min(yMax, wa.y + Math.round(wa.height * frac(fence.bottom, 1)) - bounds.height);
+    let yMax = wa.y + wa.height - petH - marginY;
+    // #810: optional roam fence — a user-editable rectangle (fractions of the
+    // work area) that further restricts where targets may land. State comes
+    // from the injected loader's in-memory cache (main.js wires
+    // src/roam-fence.js; refreshed asynchronously in scheduleNextRoam), never
+    // from disk here. When no fence applies — loader absent, file missing,
+    // disabled, invalid, or a full-range rectangle that shrinks nothing — the
+    // intervals and thresholds below stay exactly the historical values.
+    let fenceRect = null;
+    let fenceShrinks = false;
+    const fenceState =
+      ctx.roamFence && typeof ctx.roamFence.get === "function"
+        ? ctx.roamFence.get()
+        : null;
+    if (fenceState && fenceState.active) {
+      fenceRect = {
+        left: wa.x + Math.round(wa.width * fenceState.left),
+        top: wa.y + Math.round(wa.height * fenceState.top),
+        right: wa.x + Math.round(wa.width * fenceState.right),
+        bottom: wa.y + Math.round(wa.height * fenceState.bottom),
+      };
+      const fxMin = Math.max(xMin, fenceRect.left);
+      const fxMax = Math.min(xMax, fenceRect.right - petW);
+      const fyMin = Math.max(yMin, fenceRect.top);
+      const fyMax = Math.min(yMax, fenceRect.bottom - petH);
+      fenceShrinks =
+        fxMin > xMin || fxMax < xMax || fyMin > yMin || fyMax < yMax;
+      xMin = fxMin;
+      xMax = fxMax;
+      yMin = fyMin;
+      yMax = fyMax;
+      // A fence that doesn't shrink the candidate interval must not change
+      // behavior at all — drop it so no fence-only code paths run.
+      if (!fenceShrinks) fenceRect = null;
+    }
+    // #810: a fence smaller than ROAM_MIN_DIST would reject every candidate,
+    // so the minimum hop scales down with the fenced interval — but only when
+    // an active fence actually shrank it; otherwise the historical 100px
+    // threshold applies unchanged (including the "small work area, no fence"
+    // case, which must keep returning no target).
+    const minDist = fenceShrinks
+      ? Math.min(
+          ROAM_MIN_DIST,
+          Math.max(
+            24,
+            Math.round(
+              (Math.max(0, xMax - xMin) + Math.max(0, yMax - yMin)) / 4,
+            ),
+          ),
+        )
+      : ROAM_MIN_DIST;
+    // Axis-constrained walks move along one axis only, so their reachable
+    // distance is bounded by that axis' range alone (best case ~range from an
+    // edge, ~range/2 from the center) — scale per-axis, same 24px floor.
+    const axisMinDist = (range) =>
+      fenceShrinks
+        ? Math.min(ROAM_MIN_DIST, Math.max(24, Math.round(range / 2)))
+        : ROAM_MIN_DIST;
+    /* #686: axis-constrained roam — pick a target that varies in only one axis.
+     * Randomly choose horizontal (same Y, random X) or vertical (same X, random Y).
+     * The constrained branch owns its complete retry/fallback behavior: it never
+     * falls through to the two-dimensional picker or corner fallback below.
+     *
+     * Invariant: exactly one coordinate equals the walk's starting coordinate.
+     * The stationary coordinate is never clamped or adjusted — if the pet starts
+     * outside the inner margin band, that position is kept as-is so the "axis-only"
+     * promise holds even at screen edges. */
+    if (constrainAxis) {
+      /* #810 fence × #686 axis: a single-axis move keeps one coordinate
+       * exactly, so that stationary coordinate must already satisfy the fence
+       * or the final window ends up outside it (PR #810 review). Rule:
+       *   • start fully inside the fence → either axis may be selected;
+       *   • exactly one coordinate outside → that coordinate must be the
+       *     moving axis (the walk pulls it back inside);
+       *   • both coordinates outside → no single-axis move can restore
+       *     containment: return no target this round rather than move
+       *     diagonally.
+       * Without an active fence the historical behavior is untouched: either
+       * axis, stationary coordinate kept as-is even outside the margin band. */
+      let forcedAxis = null;
+      if (fenceRect) {
+        const insideX =
+          bounds.x >= fenceRect.left && bounds.x + petW <= fenceRect.right;
+        const insideY =
+          bounds.y >= fenceRect.top && bounds.y + petH <= fenceRect.bottom;
+        if (!insideX && !insideY) return null;
+        if (!insideX) forcedAxis = "horizontal";
+        else if (!insideY) forcedAxis = "vertical";
       }
-    } catch {}
-    if (xMax <= xMin || yMax <= yMin) return null;
-    // Small fences need a smaller minimum hop or every target gets rejected.
-    const minDist = Math.min(ROAM_MIN_DIST, Math.max(24, Math.round((xMax - xMin + yMax - yMin) / 4)));
-    const targetX = xMin + Math.floor(Math.random() * (xMax - xMin));
-    const targetY = yMin + Math.floor(Math.random() * (yMax - yMin));
-    const dx = targetX - bounds.x;
-    const dy = targetY - bounds.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < minDist) return null;
-    return { x: targetX, y: targetY };
+      const tryAxis = (axis) => {
+        if (axis === "horizontal") {
+          // Keep Y unchanged, pick random X
+          const range = xMax - xMin;
+          if (range < 0) return null;
+          const min = axisMinDist(range);
+          if (range > 0) {
+            for (let i = 0; i < ROAM_TARGET_ATTEMPTS; i += 1) {
+              const targetX = xMin + Math.floor(Math.random() * range);
+              if (Math.abs(targetX - bounds.x) >= min) {
+                return {
+                  x: targetX,
+                  y: bounds.y,
+                  axis: "horizontal",
+                  size,
+                  fence: fenceRect,
+                };
+              }
+            }
+          }
+          // Fallback: farthest edge on X
+          const farX =
+            Math.abs(xMin - bounds.x) >= Math.abs(xMax - bounds.x)
+              ? xMin
+              : xMax;
+          if (Math.abs(farX - bounds.x) >= min) {
+            return {
+              x: farX,
+              y: bounds.y,
+              axis: "horizontal",
+              size,
+              fence: fenceRect,
+            };
+          }
+          return null;
+        } else {
+          // Keep X unchanged, pick random Y
+          const range = yMax - yMin;
+          if (range < 0) return null;
+          const min = axisMinDist(range);
+          if (range > 0) {
+            for (let i = 0; i < ROAM_TARGET_ATTEMPTS; i += 1) {
+              const targetY = yMin + Math.floor(Math.random() * range);
+              if (Math.abs(targetY - bounds.y) >= min) {
+                return {
+                  x: bounds.x,
+                  y: targetY,
+                  axis: "vertical",
+                  size,
+                  fence: fenceRect,
+                };
+              }
+            }
+          }
+          // Fallback: farthest edge on Y
+          const farY =
+            Math.abs(yMin - bounds.y) >= Math.abs(yMax - bounds.y)
+              ? yMin
+              : yMax;
+          if (Math.abs(farY - bounds.y) >= min) {
+            return {
+              x: bounds.x,
+              y: farY,
+              axis: "vertical",
+              size,
+              fence: fenceRect,
+            };
+          }
+          return null;
+        }
+      };
+
+      if (forcedAxis) return tryAxis(forcedAxis);
+      // Randomly prefer one axis; if it fails, try the other
+      const firstAxis = Math.random() < 0.5 ? "horizontal" : "vertical";
+      const secondAxis = firstAxis === "horizontal" ? "vertical" : "horizontal";
+      return tryAxis(firstAxis) || tryAxis(secondAxis);
+    }
+
+    // #810 review: an exact-fit corridor — fence width or height exactly the
+    // pet size, so one interval collapses to a single point — is still valid
+    // geometry; movement continues on the other axis. Only a negative interval
+    // is impossible. The historical (no-fence) check keeps its `<=` so parent
+    // behavior stays bit-identical without a fence.
+    if (fenceRect) {
+      if (xMax < xMin || yMax < yMin) return null;
+    } else if (xMax <= xMin || yMax <= yMin) return null;
+
+    for (let i = 0; i < ROAM_TARGET_ATTEMPTS; i += 1) {
+      const targetX = xMin + Math.floor(Math.random() * (xMax - xMin));
+      const targetY = yMin + Math.floor(Math.random() * (yMax - yMin));
+      const dx = targetX - bounds.x;
+      const dy = targetY - bounds.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist >= minDist)
+        return { x: targetX, y: targetY, size, fence: fenceRect };
+    }
+
+    const fallbackTargets = [
+      { x: xMin, y: yMin },
+      { x: xMax, y: yMin },
+      { x: xMin, y: yMax },
+      { x: xMax, y: yMax },
+    ];
+    let best = null;
+    let bestDist = -1;
+    for (const target of fallbackTargets) {
+      const dx = target.x - bounds.x;
+      const dy = target.y - bounds.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > bestDist) {
+        best = target;
+        bestDist = dist;
+      }
+    }
+    return bestDist >= minDist ? { ...best, size, fence: fenceRect } : null;
   }
 
-  function animateTo(targetX, targetY) {
-    if (roamAnimTimer) { clearTimeout(roamAnimTimer); roamAnimTimer = null; }
+  function animateTo(target) {
+    if (roamAnimTimer) {
+      clearTimeout(roamAnimTimer);
+      roamAnimTimer = null;
+    }
     const win = ctx.win;
-    if (!win || win.isDestroyed()) { roamActive = false; return; }
+    if (!win || win.isDestroyed()) {
+      roamActive = false;
+      return;
+    }
     const startBounds = ctx.getPetWindowBounds();
-    if (!startBounds) { roamActive = false; return; }
+    if (!startBounds) {
+      roamActive = false;
+      return;
+    }
     const startX = startBounds.x;
     const startY = startBounds.y;
-    let finalX = targetX;
-    let finalY = targetY;
+    const axis = target.axis;
+    // #569: freeze the window size for the whole walk (mirrors the drag
+    // snapshot in drag-position.js). Re-reading live bounds every frame lets
+    // the non-idempotent setBounds(getBounds()) round-trip on mixed-DPI
+    // Windows setups ratchet the pet larger while roaming — same mechanism
+    // as #408. When keepSizeAcrossDisplays is ON, the frozen keep-size wins
+    // over the live start bounds so both anchors share one source of truth.
+    // #810: the snapshot is resolved once in pickRandomTarget() and carried on
+    // the target, so planning and animation can never disagree about the
+    // window size; the inline fallback only covers a caller without one.
+    const plannedSize = target.size;
+    const effectiveSize =
+      plannedSize ||
+      (typeof ctx.getEffectiveCurrentPixelSize === "function"
+        ? ctx.getEffectiveCurrentPixelSize()
+        : null);
+    const roamW =
+      effectiveSize &&
+      Number.isFinite(effectiveSize.width) &&
+      effectiveSize.width > 0
+        ? effectiveSize.width
+        : startBounds.width;
+    const roamH =
+      effectiveSize &&
+      Number.isFinite(effectiveSize.height) &&
+      effectiveSize.height > 0
+        ? effectiveSize.height
+        : startBounds.height;
+    let finalX = target.x;
+    let finalY = target.y;
     if (ctx.clampToScreenVisual) {
-      const clamped = ctx.clampToScreenVisual(finalX, finalY, startBounds.width, startBounds.height);
+      const clamped = ctx.clampToScreenVisual(finalX, finalY, roamW, roamH);
       finalX = clamped.x;
       finalY = clamped.y;
+    }
+    // #686 (review pass 2): the picker returns an axis-aligned target, but
+    // clampToScreenVisual() may correct the stationary coordinate when the pet
+    // starts outside the rest-clamp region (e.g. Y=-100 clamped up to 0). That
+    // would reintroduce a diagonal interpolation. Restore the stationary axis
+    // to the walk's starting coordinate so every applied frame keeps exactly
+    // one coordinate equal to the start — the moving axis still benefits from
+    // the clamp. Non-constrained roams (axis undefined) are unaffected.
+    if (axis === "horizontal") {
+      finalY = startY;
+    } else if (axis === "vertical") {
+      finalX = startX;
+    }
+    // #810: the fence promise is about the real window rectangle, not the
+    // picked target — clampToScreenVisual() knows nothing about the fence and
+    // can move the target when the visual clamp region disagrees with it.
+    // Revalidate the final full-window rect (post-clamp, post-axis-restore,
+    // frozen size) and skip the round instead of walking out of bounds. The
+    // axis invariant needs no re-check here: the restore above just pinned the
+    // stationary coordinate.
+    if (target.fence) {
+      const f = target.fence;
+      if (
+        finalX < f.left ||
+        finalX + roamW > f.right ||
+        finalY < f.top ||
+        finalY + roamH > f.bottom
+      ) {
+        scheduleNextRoam();
+        return;
+      }
     }
     // ── Calculate duration based on distance (speed = 80px/s) ──
     const dx = finalX - startX;
     const dy = finalY - startY;
     const dist = Math.sqrt(dx * dx + dy * dy);
     const animDurationMs = Math.max(1000, dist / ROAM_SPEED_PX_PER_MS);
+
+    // ── Face the walk direction ──
+    // Dedicated roam visuals (e.g. clawd's crabwalk) are drawn facing right;
+    // tell the renderer to mirror while heading left. Sent before applyState
+    // so the flip is settled when the roam visual swaps in. A purely vertical
+    // walk keeps the previous heading.
+    if (typeof ctx.setRoamHeading === "function" && dx !== 0) {
+      ctx.setRoamHeading(dx < 0);
+    }
 
     // ── Switch to "roam" visual state before moving ──
     // This ensures the pet shows a walk animation (if the theme provides one)
@@ -127,14 +437,26 @@ module.exports = function initRoam(ctx) {
     function step() {
       // ── Per-frame cancellation checks ──
       if (!roamActive) return;
-      if (!win || win.isDestroyed()) { roamActive = false; return; }
+      if (!win || win.isDestroyed()) {
+        // PR #751 Codex review (rework batch B-1, non-blocking #3): this
+        // exception exit used to leave the reconcile protection period
+        // un-released — isRoamAnimating() correctly flips false immediately,
+        // but nothing then requeues a check for whatever reconcile went dirty
+        // while roam was active, same class of gap as mini.js's exit points.
+        roamActive = false;
+        notifyRoamProtectionReleased();
+        return;
+      }
       // Re-check state on every frame: if the pet is no longer idle/roam (e.g. a
       // working/notification event arrived), stop the animation immediately.
       if (!isRoamAllowed()) {
-        roamActive = false;
-        cleanupTimers();
-        // State changed away from idle/roam — next idle entry should wait full delay
-        firstRoam = true;
+        // A drag only pauses the current roam phase; other gates still mean the
+        // pet left normal idle eligibility and reset the next wait to 8s.
+        if (!ctx.dragLocked) firstRoam = true;
+        // cancelRoam also restores "idle" when the state is still "roam" —
+        // gates with no incoming state of their own (IME editing #640, mini
+        // mode) would otherwise strand the pet frozen in its walk pose.
+        cancelRoam();
         return;
       }
 
@@ -143,14 +465,27 @@ module.exports = function initRoam(ctx) {
       const eased = t * (2 - t);
       const vx = Math.round(startX + (finalX - startX) * eased);
       const vy = Math.round(startY + (finalY - startY) * eased);
-      if (!Number.isFinite(vx) || !Number.isFinite(vy)) { roamActive = false; return; }
+      if (!Number.isFinite(vx) || !Number.isFinite(vy)) {
+        // Same reconcile-protection release gap as the destroyed-window exit
+        // above.
+        roamActive = false;
+        notifyRoamProtectionReleased();
+        return;
+      }
 
       // ── Per-frame sync ──
-      ctx.applyPetWindowPosition(vx, vy);
+      // Write the anchored size, never a re-read of live bounds (#569).
+      ctx.applyPetWindowBounds({ x: vx, y: vy, width: roamW, height: roamH });
       if (typeof ctx.syncHitWin === "function") ctx.syncHitWin();
-      if (typeof ctx.repositionAnchoredSurfaces === "function") ctx.repositionAnchoredSurfaces();
+      if (typeof ctx.repositionAnchoredSurfaces === "function")
+        ctx.repositionAnchoredSurfaces();
       // Throttle bubble reposition to every 3rd frame (~20fps) — same as mini.js
-      if (typeof ctx.repositionBubbles === "function" && ctx.bubbleFollowPet && ctx.pendingPermissions.length && (++frameCount % 3 === 0 || t >= 1)) {
+      if (
+        typeof ctx.repositionBubbles === "function" &&
+        ctx.bubbleFollowPet &&
+        ctx.pendingPermissions.length &&
+        (++frameCount % 3 === 0 || t >= 1)
+      ) {
         ctx.repositionBubbles();
       }
 
@@ -158,6 +493,7 @@ module.exports = function initRoam(ctx) {
         roamAnimTimer = setTimeout(step, ROAM_FRAME_MS);
       } else {
         roamActive = false;
+        notifyRoamProtectionReleased();
         // ── Return to idle via setState (respects priority) ──
         // If a higher-priority state was set while the last frame was in
         // flight, setState("idle") won't downgrade it.
@@ -171,16 +507,29 @@ module.exports = function initRoam(ctx) {
   }
 
   function scheduleNextRoam() {
-    if (roamPauseTimer) { clearTimeout(roamPauseTimer); roamPauseTimer = null; }
+    if (roamPauseTimer) {
+      clearTimeout(roamPauseTimer);
+      roamPauseTimer = null;
+    }
     if (!enabled) return;
+    // #810: kick an async re-read of the fence file now, so the cached state
+    // is fresh by the time this pause elapses and pickRandomTarget() runs.
+    // Target selection itself never touches the disk; an edit to the file
+    // applies within one roam pause, no restart needed.
+    if (ctx.roamFence && typeof ctx.roamFence.refresh === "function") {
+      ctx.roamFence.refresh();
+    }
     const delay = firstRoam ? ROAM_IDLE_DELAY_MS : ROAM_BETWEEN_DELAY_MS;
     firstRoam = false;
     roamPauseTimer = setTimeout(() => {
       roamPauseTimer = null;
       if (!isRoamAllowed()) return;
       const target = pickRandomTarget();
-      if (!target) { scheduleNextRoam(); return; }
-      animateTo(target.x, target.y);
+      if (!target) {
+        scheduleNextRoam();
+        return;
+      }
+      animateTo(target);
     }, delay);
   }
 
@@ -196,21 +545,46 @@ module.exports = function initRoam(ctx) {
     }
   }
 
+  function setConstrainAxis(value) {
+    const next = !!value;
+    if (next === constrainAxis) return;
+    constrainAxis = next;
+    // When enabling the constraint during an active unconstrained roam,
+    // cancel and replan so the new restriction takes effect immediately
+    // instead of finishing the current diagonal walk.
+    if (next && roamActive) {
+      cancelRoam();
+      if (enabled && isRoamAllowed()) {
+        firstRoam = true;
+        scheduleNextRoam();
+      }
+    }
+  }
+
   function cancelRoam() {
-    const shouldRestoreIdle = roamActive
-      && typeof ctx.getCurrentState === "function"
-      && ctx.getCurrentState() === "roam"
-      && typeof ctx.setState === "function";
+    const shouldRestoreIdle =
+      roamActive &&
+      typeof ctx.getCurrentState === "function" &&
+      ctx.getCurrentState() === "roam" &&
+      typeof ctx.setState === "function";
+    const wasActive = roamActive;
     cleanupTimers();
     roamActive = false;
-    if (shouldRestoreIdle) ctx.setState("idle");
+    if (wasActive) notifyRoamProtectionReleased();
+    // Roam is an interruptible movement state. A user theme may define
+    // timings.minDisplay.roam, but cancelling a walk must restore idle now so
+    // a delayed idle broadcast cannot overwrite a drag reaction mid-hold.
+    if (shouldRestoreIdle) {
+      ctx.setState("idle", undefined, { bypassMinDisplay: true });
+    }
   }
 
   function tick() {
     if (!enabled) return;
     if (!isRoamAllowed()) {
-      // State changed away from idle/roam — next idle entry should wait full delay
-      firstRoam = true;
+      // Preserve the already-consumed 4s/8s phase while drag owns movement.
+      // Existing non-drag gates still reset the next idle entry to 8s.
+      if (!ctx.dragLocked) firstRoam = true;
       cancelRoam();
       return;
     }
@@ -219,5 +593,22 @@ module.exports = function initRoam(ctx) {
     scheduleNextRoam();
   }
 
-  return { setEnabled, cancelRoam, tick, get enabled() { return enabled; } };
+  // Issue #690 plan §4.3.10's protection-period predicate: pet-window-runtime's
+  // runReconcile() polls this (isRoamAnimating()) alongside dragLocked /
+  // getMiniTransitioning() / isMiniAnimating() / settingsSizePreviewSyncFrozen
+  // so a reconcile pass never fights roam's own per-frame writes.
+  function isRoamAnimating() {
+    return roamActive;
+  }
+
+  return {
+    setEnabled,
+    setConstrainAxis,
+    cancelRoam,
+    tick,
+    isRoamAnimating,
+    get enabled() {
+      return enabled;
+    },
+  };
 };

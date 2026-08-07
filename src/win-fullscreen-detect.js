@@ -1,0 +1,135 @@
+"use strict";
+
+// ── Windows: detect whether the foreground window is fullscreen ──
+//
+// The topmost watchdog (topmost-runtime.js) re-asserts the pet/hit windows to
+// the "pop-up-menu" level every few seconds, and guardAlwaysOnTop fights back
+// whenever something else grabs topmost. On Windows that means a fullscreen
+// game/video keeps getting interrupted: the pet claws its way back on top
+// roughly every watchdog tick (#538).
+//
+// This probe lets the watchdog ask "is a real fullscreen app the foreground
+// right now?" and, if so, stand down for that cycle — the pet naturally falls
+// behind the fullscreen content and pops back once the user exits fullscreen.
+//
+// Everything here is best-effort: if koffi/user32 is unavailable the factory
+// returns a probe that always answers false, so the watchdog keeps its current
+// behavior rather than ever hiding the pet because the FFI broke.
+
+// A maximized normal window covers the work area but leaves the taskbar strip,
+// so its rect stops short of the full monitor. A fullscreen app covers the
+// whole monitor (rcMonitor). A couple of px of slack absorbs DPI rounding
+// without mistaking a maximized window for fullscreen.
+const FULLSCREEN_TOLERANCE_PX = 2;
+
+const MONITOR_DEFAULTTONEAREST = 2;
+
+// #719: the desktop itself passes the geometry test. Clicking the desktop
+// makes the shell window the foreground window — Progman, or one of
+// explorer's WorkerW siblings when a wallpaper host re-parents the icon view —
+// and its rect covers the whole monitor, so geometry alone classifies the
+// bare desktop as a fullscreen app. That made the hit window go non-activating
+// ~1s after any desktop click (startFocusablePoll), and Electron's
+// setFocusable(false) on Windows ends in Focus(false), which deactivates —
+// cancelling e.g. an in-place file rename on the desktop. Excluding the shell
+// window classes keeps "fullscreen" meaning an actual app.
+const DESKTOP_SHELL_WINDOW_CLASSES = new Set(["progman", "workerw"]);
+// Ample for real class names; matches win-foreground-terminal.js.
+const CLASS_NAME_BUF_LEN = 256;
+
+// Win32 class-name comparison is case-insensitive.
+function isDesktopShellWindowClass(className) {
+  return typeof className === "string"
+    && DESKTOP_SHELL_WINDOW_CLASSES.has(className.toLowerCase());
+}
+
+// Pure geometry: does the window rect cover the entire monitor rect (not just
+// the work area)? Exported so the decision logic is unit-testable without FFI.
+function rectCoversMonitor(winRect, monitorRect, tolerance = FULLSCREEN_TOLERANCE_PX) {
+  if (!winRect || !monitorRect) return false;
+  return (
+    winRect.left <= monitorRect.left + tolerance &&
+    winRect.top <= monitorRect.top + tolerance &&
+    winRect.right >= monitorRect.right - tolerance &&
+    winRect.bottom >= monitorRect.bottom - tolerance
+  );
+}
+
+// Returns a function `() => boolean` that reports whether the current
+// foreground window covers its whole monitor. Never throws; degrades to a
+// constant-false probe off Windows or when the FFI cannot be loaded.
+function createForegroundFullscreenProbe(options = {}) {
+  const isWin = options.isWin != null ? !!options.isWin : process.platform === "win32";
+  const noop = () => false;
+  if (!isWin) return noop;
+
+  let GetForegroundWindow;
+  let GetWindowRect;
+  let MonitorFromWindow;
+  let GetMonitorInfoW;
+  let GetClassNameW;
+  let monitorInfoSize;
+  try {
+    const koffi = options.koffi || require("koffi");
+    const user32 = koffi.load("user32.dll");
+    // LONG is 32-bit even on Win64 (LLP64); use int32 to be unambiguous.
+    koffi.struct("ClawdRECT", { left: "int32", top: "int32", right: "int32", bottom: "int32" });
+    koffi.struct("ClawdMONITORINFO", {
+      cbSize: "uint32",
+      rcMonitor: "ClawdRECT",
+      rcWork: "ClawdRECT",
+      dwFlags: "uint32",
+    });
+    monitorInfoSize = koffi.sizeof("ClawdMONITORINFO");
+    GetForegroundWindow = user32.func("void* __stdcall GetForegroundWindow()");
+    GetWindowRect = user32.func("bool __stdcall GetWindowRect(void* hWnd, _Out_ ClawdRECT* lpRect)");
+    MonitorFromWindow = user32.func("void* __stdcall MonitorFromWindow(void* hWnd, uint32 dwFlags)");
+    GetMonitorInfoW = user32.func("bool __stdcall GetMonitorInfoW(void* hMonitor, _Inout_ ClawdMONITORINFO* lpmi)");
+    GetClassNameW = user32.func("int __stdcall GetClassNameW(void* hWnd, _Out_ uint16_t* lpClassName, int nMaxCount)");
+  } catch (err) {
+    if (typeof options.onError === "function") options.onError(err);
+    return noop;
+  }
+
+  return function isForegroundFullscreen() {
+    try {
+      const hwnd = GetForegroundWindow();
+      if (!hwnd) return false;
+
+      const winRect = {};
+      if (!GetWindowRect(hwnd, winRect)) return false;
+
+      const hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+      if (!hMonitor) return false;
+
+      const info = { cbSize: monitorInfoSize, rcMonitor: {}, rcWork: {}, dwFlags: 0 };
+      if (!GetMonitorInfoW(hMonitor, info)) return false;
+
+      if (!rectCoversMonitor(winRect, info.rcMonitor)) return false;
+
+      // Geometry matched — rule out the desktop shell (#719). Only reached in
+      // the rare covers-monitor case, so the extra FFI call is off the common
+      // path. A failed class read (0 length) keeps the geometric answer: the
+      // pre-#719 behavior, erring toward "fullscreen" for a covering window.
+      const classBuf = new Uint16Array(CLASS_NAME_BUF_LEN);
+      const classLen = GetClassNameW(hwnd, classBuf, CLASS_NAME_BUF_LEN);
+      if (classLen > 0) {
+        let className = "";
+        for (let i = 0; i < classLen; i++) className += String.fromCharCode(classBuf[i]);
+        if (isDesktopShellWindowClass(className)) return false;
+      }
+      return true;
+    } catch {
+      // Any FFI hiccup at call time: behave as "not fullscreen" so the
+      // watchdog keeps the pet visible rather than hiding it on an error.
+      return false;
+    }
+  };
+}
+
+module.exports = {
+  createForegroundFullscreenProbe,
+  rectCoversMonitor,
+  isDesktopShellWindowClass,
+  FULLSCREEN_TOLERANCE_PX,
+};
