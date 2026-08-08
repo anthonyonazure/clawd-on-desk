@@ -4407,6 +4407,7 @@ const _roam = require("./roam")(_roamCtx);
 // fence file exists — or confirm quickly that none does.
 _roamCtx.roamFence.refresh();
 
+let _fenceRelocTimer = null;
 // Fork feature: fence relocation. When the fence file changes, move the pet
 // INSIDE the new fence immediately, regardless of state — the user draws a
 // fence precisely to get the pet out of the way while working. Repositions
@@ -4434,10 +4435,47 @@ require("fs").watchFile(
         const ny = Math.min(Math.max(b.y, T), Math.max(T, B - b.height));
         if (nx === b.x && ny === b.y) return; // already inside
         const c = clampToScreenVisual(nx, ny, b.width, b.height);
-        applyPetWindowBounds({ x: c.x, y: c.y, width: b.width, height: b.height });
-        syncHitWin();
-        repositionAnchoredFloatingSurfaces();
-        repositionFloatingBubbles();
+        // Walk, don't teleport: same pace and easing as a roam wander
+        // (80px/s), so the relocation reads as the pet strolling out of the
+        // way. A newer fence change mid-walk restarts toward the new target;
+        // cancelRoam keeps roam's own walker from fighting this one.
+        _roam.cancelRoam();
+        if (_fenceRelocTimer) {
+          clearInterval(_fenceRelocTimer);
+          _fenceRelocTimer = null;
+        }
+        const fromX = b.x, fromY = b.y;
+        const dxr = c.x - fromX, dyr = c.y - fromY;
+        const distR = Math.sqrt(dxr * dxr + dyr * dyr);
+        const durR = Math.max(300, distR / 0.08);
+        const startR = Date.now();
+        _fenceRelocTimer = setInterval(() => {
+          try {
+            if (petWindowRuntime.isDragLocked()) {
+              clearInterval(_fenceRelocTimer);
+              _fenceRelocTimer = null;
+              return;
+            }
+            const t = Math.min(1, (Date.now() - startR) / durR);
+            const e = t * (2 - t);
+            applyPetWindowBounds({
+              x: Math.round(fromX + dxr * e),
+              y: Math.round(fromY + dyr * e),
+              width: b.width,
+              height: b.height,
+            });
+            syncHitWin();
+            repositionAnchoredFloatingSurfaces();
+            repositionFloatingBubbles();
+            if (t >= 1) {
+              clearInterval(_fenceRelocTimer);
+              _fenceRelocTimer = null;
+            }
+          } catch {
+            clearInterval(_fenceRelocTimer);
+            _fenceRelocTimer = null;
+          }
+        }, 16);
       } catch {}
     });
   },
