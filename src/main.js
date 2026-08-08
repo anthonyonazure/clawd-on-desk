@@ -4407,6 +4407,42 @@ const _roam = require("./roam")(_roamCtx);
 // fence file exists — or confirm quickly that none does.
 _roamCtx.roamFence.refresh();
 
+// Fork feature: fence relocation. When the fence file changes, move the pet
+// INSIDE the new fence immediately, regardless of state — the user draws a
+// fence precisely to get the pet out of the way while working. Repositions
+// through the same window channel as a drag; the current animation continues
+// in the new spot. watchFile (polling) survives atomic replace-saves.
+require("fs").watchFile(
+  _roamCtx.roamFence.filePath,
+  { interval: 1000 },
+  () => {
+    Promise.resolve(_roamCtx.roamFence.refresh()).then(() => {
+      try {
+        const fence = _roamCtx.roamFence.get();
+        if (!fence || !fence.active) return;
+        if (_mini.getMiniMode()) return; // mini pet is docked, leave it alone
+        if (petWindowRuntime.isDragLocked()) return; // never fight a drag
+        const b = getPetWindowBounds();
+        if (!b) return;
+        const wa = getNearestWorkArea(b.x + b.width / 2, b.y + b.height / 2);
+        if (!wa) return;
+        const L = wa.x + Math.round(wa.width * fence.left);
+        const R = wa.x + Math.round(wa.width * fence.right);
+        const T = wa.y + Math.round(wa.height * fence.top);
+        const B = wa.y + Math.round(wa.height * fence.bottom);
+        const nx = Math.min(Math.max(b.x, L), Math.max(L, R - b.width));
+        const ny = Math.min(Math.max(b.y, T), Math.max(T, B - b.height));
+        if (nx === b.x && ny === b.y) return; // already inside
+        const c = clampToScreenVisual(nx, ny, b.width, b.height);
+        applyPetWindowBounds({ x: c.x, y: c.y, width: b.width, height: b.height });
+        syncHitWin();
+        repositionAnchoredFloatingSurfaces();
+        repositionFloatingBubbles();
+      } catch {}
+    });
+  },
+);
+
 // Free roam: initialize from prefs and react to toggle changes
 _roam.setEnabled(_settingsController.get("freeRoam") === true);
 _roam.setConstrainAxis(_settingsController.get("roamConstrainAxis") === true);
