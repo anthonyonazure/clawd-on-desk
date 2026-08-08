@@ -3410,6 +3410,27 @@ function showResumeInput(t) {
 
 const _menuCtx = {
   get win() { return win; },
+  cancelRoam: () => _roam.cancelRoam(),
+  // Fork feature: "Draw Roam Fence" in the pet's right-click menu spawns the
+  // overlay tool (tools/outlaw/fence-draw.swift, compiled to ~/.clawd/mods).
+  // Detached: the overlay outlives the menu and writes ~/.clawd/roam-area.json.
+  drawRoamFence: () => {
+    const bin = require("path").join(
+      require("os").homedir(), ".clawd", "mods", "clawd-fence-draw");
+    try {
+      if (!require("fs").existsSync(bin)) {
+        console.warn("Clawd: fence-draw tool missing at", bin,
+          "— build it: swiftc -O tools/outlaw/fence-draw.swift -o", bin);
+        return;
+      }
+      const child = require("child_process").spawn(bin, [], {
+        detached: true, stdio: "ignore",
+      });
+      child.unref();
+    } catch (err) {
+      console.warn("Clawd: fence-draw launch failed:", err && err.message);
+    }
+  },
   get costHudEnabled() { return costHudEnabled; },
   set costHudEnabled(v) { _settingsController.applyUpdate("costHudEnabled", v); },
   getTodayCostText() { return costTracker.formatUsd(_todayCost ? _todayCost.usd : 0); },

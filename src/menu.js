@@ -509,6 +509,12 @@ module.exports = function initMenu(ctx) {
         },
       },
       {
+        label: t("drawRoamFence"),
+        click: () => {
+          if (typeof ctx.drawRoamFence === "function") ctx.drawRoamFence();
+        },
+      },
+      {
         label: t("newSession"),
         submenu: [
           {
@@ -574,6 +580,10 @@ module.exports = function initMenu(ctx) {
 
   function showPetContextMenu() {
     if (!ctx.win || ctx.win.isDestroyed()) return;
+    // Right-clicking the pet means "hold still, I want the menu": cancel any
+    // walk in flight (eye tracking is a separate system and keeps following).
+    // cancelRoam restores idle, and the next walk re-schedules on its own.
+    if (typeof ctx.cancelRoam === "function") ctx.cancelRoam();
     buildContextMenu();
     popupMenuAt(ctx.contextMenu);
   }
