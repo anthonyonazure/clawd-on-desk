@@ -20,3 +20,15 @@ Never launch the app from a VSCode/Claude Code shell without a clean env: `ELECT
 ```sh
 env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin /usr/bin/open -a "Clawd on Desk"
 ```
+
+## Draw the fence with the mouse
+
+`clawd-roam draw` (or run `~/.clawd/mods/clawd-fence-draw` directly) dims the
+screen under the cursor; drag a rectangle and release to set the fence, Esc to
+cancel. The selection is converted to work-area fractions and written to
+`~/.clawd/roam-area.json`; the running app applies it within one roam pause.
+Build the binary once with:
+
+```sh
+swiftc -O tools/outlaw/fence-draw.swift -o ~/.clawd/mods/clawd-fence-draw
+```

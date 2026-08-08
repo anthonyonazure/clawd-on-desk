@@ -7,6 +7,7 @@
 #   clawd-roam bottom | top | left | right      (half of the screen)
 #   clawd-roam full                             (no fence)
 #   clawd-roam <left> <top> <right> <bottom>    (fractions 0..1 of the screen)
+#   clawd-roam draw                             (drag the fence with the mouse)
 
 F="${HOME}/.clawd/roam-area.json"
 
@@ -16,6 +17,17 @@ write() {
 }
 
 case "$1" in
+  draw)
+    # Full-screen overlay: drag a rectangle, release to set, Esc to cancel.
+    # Binary built from fence-draw.swift (see README).
+    DRAW="${HOME}/.clawd/mods/clawd-fence-draw"
+    if [[ ! -x "$DRAW" ]]; then
+      echo "clawd-roam: $DRAW missing — build it with:"
+      echo "  swiftc -O tools/outlaw/fence-draw.swift -o $DRAW"
+      exit 1
+    fi
+    exec "$DRAW"
+    ;;
   bottom-right) write 0.55 0.55 1.0 1.0 true ;;
   bottom-left)  write 0.0 0.55 0.45 1.0 true ;;
   top-right)    write 0.55 0.0 1.0 0.45 true ;;
