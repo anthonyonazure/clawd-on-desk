@@ -3415,6 +3415,10 @@ const _menuCtx = {
   // overlay tool (tools/outlaw/fence-draw.swift, compiled to ~/.clawd/mods).
   // Detached: the overlay outlives the menu and writes ~/.clawd/roam-area.json.
   drawRoamFence: () => {
+    if (process.platform !== "darwin") return;
+    // Singleton: a second click while the overlay is up must not stack a
+    // second full-screen overlay.
+    if (_fenceDrawChild && _fenceDrawChild.exitCode === null) return;
     const bin = require("path").join(
       require("os").homedir(), ".clawd", "mods", "clawd-fence-draw");
     try {
@@ -3426,6 +3430,15 @@ const _menuCtx = {
       const child = require("child_process").spawn(bin, [], {
         detached: true, stdio: "ignore",
       });
+      // spawn() failures (EACCES on a non-executable file, ENOENT racing the
+      // existsSync check) arrive as an async 'error' event — without this
+      // listener they are an uncaught exception in the main process.
+      child.on("error", (err) => {
+        _fenceDrawChild = null;
+        console.warn("Clawd: fence-draw launch failed:", err && err.message);
+      });
+      child.on("exit", () => { _fenceDrawChild = null; });
+      _fenceDrawChild = child;
       child.unref();
     } catch (err) {
       console.warn("Clawd: fence-draw launch failed:", err && err.message);
@@ -4372,6 +4385,7 @@ const { enterMiniMode, exitMiniMode, enterMiniViaMenu, miniPeekIn, miniPeekOut,
 const _roamCtx = {
   get win() { return win; },
   get dragLocked() { return petWindowRuntime.isDragLocked(); },
+  get menuOpen() { return menuOpen; },
   getPetWindowBounds,
   applyPetWindowBounds,
   // #569: lets roam anchor to the keep-size frozen size when that toggle is on
@@ -4407,79 +4421,54 @@ const _roam = require("./roam")(_roamCtx);
 // fence file exists — or confirm quickly that none does.
 _roamCtx.roamFence.refresh();
 
-let _fenceRelocTimer = null;
-// Fork feature: fence relocation. When the fence file changes, move the pet
+let _fenceDrawChild = null;
+// Fork feature: fence relocation. When the fence file changes, walk the pet
 // INSIDE the new fence immediately, regardless of state — the user draws a
-// fence precisely to get the pet out of the way while working. Repositions
-// through the same window channel as a drag; the current animation continues
-// in the new spot. watchFile (polling) survives atomic replace-saves.
-require("fs").watchFile(
-  _roamCtx.roamFence.filePath,
-  { interval: 1000 },
-  () => {
-    Promise.resolve(_roamCtx.roamFence.refresh()).then(() => {
-      try {
-        const fence = _roamCtx.roamFence.get();
-        if (!fence || !fence.active) return;
-        if (_mini.getMiniMode()) return; // mini pet is docked, leave it alone
-        if (petWindowRuntime.isDragLocked()) return; // never fight a drag
-        const b = getPetWindowBounds();
-        if (!b) return;
-        const wa = getNearestWorkArea(b.x + b.width / 2, b.y + b.height / 2);
-        if (!wa) return;
-        const L = wa.x + Math.round(wa.width * fence.left);
-        const R = wa.x + Math.round(wa.width * fence.right);
-        const T = wa.y + Math.round(wa.height * fence.top);
-        const B = wa.y + Math.round(wa.height * fence.bottom);
-        const nx = Math.min(Math.max(b.x, L), Math.max(L, R - b.width));
-        const ny = Math.min(Math.max(b.y, T), Math.max(T, B - b.height));
-        if (nx === b.x && ny === b.y) return; // already inside
-        const c = clampToScreenVisual(nx, ny, b.width, b.height);
-        // Walk, don't teleport: same pace and easing as a roam wander
-        // (80px/s), so the relocation reads as the pet strolling out of the
-        // way. A newer fence change mid-walk restarts toward the new target;
-        // cancelRoam keeps roam's own walker from fighting this one.
+// fence precisely to get the pet out of the way while working. The movement
+// is a directed roam walk (_roam.relocateTo), which inherits the walk pose,
+// heading, frozen-size anchoring, reconcile protection, and single-writer
+// scheduling — a competing wander cannot start mid-relocation. watchFile
+// (polling) survives atomic replace-saves; unwatched on quit.
+const _fenceWatchPath = _roamCtx.roamFence.filePath;
+const _onFenceFileChange = () => {
+  Promise.resolve(_roamCtx.roamFence.refresh()).then(() => {
+    try {
+      const fence = _roamCtx.roamFence.get();
+      if (!fence) return; // UNKNOWN — nothing confirmed yet
+      if (!fence.active) {
+        // Fence removed/disabled mid-walk: stop any in-flight relocation.
         _roam.cancelRoam();
-        if (_fenceRelocTimer) {
-          clearInterval(_fenceRelocTimer);
-          _fenceRelocTimer = null;
-        }
-        const fromX = b.x, fromY = b.y;
-        const dxr = c.x - fromX, dyr = c.y - fromY;
-        const distR = Math.sqrt(dxr * dxr + dyr * dyr);
-        const durR = Math.max(300, distR / 0.08);
-        const startR = Date.now();
-        _fenceRelocTimer = setInterval(() => {
-          try {
-            if (petWindowRuntime.isDragLocked()) {
-              clearInterval(_fenceRelocTimer);
-              _fenceRelocTimer = null;
-              return;
-            }
-            const t = Math.min(1, (Date.now() - startR) / durR);
-            const e = t * (2 - t);
-            applyPetWindowBounds({
-              x: Math.round(fromX + dxr * e),
-              y: Math.round(fromY + dyr * e),
-              width: b.width,
-              height: b.height,
-            });
-            syncHitWin();
-            repositionAnchoredFloatingSurfaces();
-            repositionFloatingBubbles();
-            if (t >= 1) {
-              clearInterval(_fenceRelocTimer);
-              _fenceRelocTimer = null;
-            }
-          } catch {
-            clearInterval(_fenceRelocTimer);
-            _fenceRelocTimer = null;
-          }
-        }, 16);
-      } catch {}
-    });
-  },
-);
+        return;
+      }
+      const b = getPetWindowBounds();
+      if (!b) return;
+      const effSize = getEffectiveCurrentPixelSize();
+      const petW =
+        effSize && Number.isFinite(effSize.width) && effSize.width > 0
+          ? effSize.width
+          : b.width;
+      const petH =
+        effSize && Number.isFinite(effSize.height) && effSize.height > 0
+          ? effSize.height
+          : b.height;
+      const wa = getNearestWorkArea(b.x + b.width / 2, b.y + b.height / 2);
+      if (!wa) return;
+      const L = wa.x + Math.round(wa.width * fence.left);
+      const R = wa.x + Math.round(wa.width * fence.right);
+      const T = wa.y + Math.round(wa.height * fence.top);
+      const B = wa.y + Math.round(wa.height * fence.bottom);
+      const nx = Math.min(Math.max(b.x, L), Math.max(L, R - petW));
+      const ny = Math.min(Math.max(b.y, T), Math.max(T, B - petH));
+      if (nx === b.x && ny === b.y) return; // already inside
+      const c = clampToScreenVisual(nx, ny, petW, petH);
+      _roam.relocateTo(c.x, c.y);
+    } catch {}
+  });
+};
+require("fs").watchFile(_fenceWatchPath, { interval: 1000 }, _onFenceFileChange);
+app.on("will-quit", () => {
+  try { require("fs").unwatchFile(_fenceWatchPath, _onFenceFileChange); } catch {}
+});
 
 // Free roam: initialize from prefs and react to toggle changes
 _roam.setEnabled(_settingsController.get("freeRoam") === true);

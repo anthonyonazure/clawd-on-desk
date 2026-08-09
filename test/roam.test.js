@@ -2496,3 +2496,120 @@ describe("roam fence round-4 review (#810): edge fences", () => {
     );
   });
 });
+
+describe("directed walk / fence relocation (fork)", () => {
+  beforeEach(() => {
+    mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+    mock.reset();
+  });
+
+  function finish(ctx) {
+    for (let i = 0; i < 4000; i += 1) {
+      mock.timers.tick(16);
+      if (
+        ctx._stateLog.some((e) => e.type === "setState" && e.state === "idle")
+      )
+        break;
+    }
+  }
+
+  it("relocates while the pet is WORKING (state gate bypassed by design)", () => {
+    const ctx = makeCtx();
+    ctx.setCurrentState("working");
+    const roam = roamModule(ctx);
+    // freeRoam not even enabled — relocation must still work
+    assert.equal(roam.relocateTo(900, 500), true);
+    finish(ctx);
+    assert.ok(ctx._appliedBounds.length > 0, "walk frames applied");
+    const last = ctx._appliedBounds[ctx._appliedBounds.length - 1];
+    assert.deepEqual({ x: last.x, y: last.y }, { x: 900, y: 500 });
+  });
+
+  it("no competing wander can start mid-relocation (single writer)", () => {
+    mock.method(Math, "random", () => 0.9);
+    const ctx = makeCtx();
+    const roam = roamModule(ctx);
+    roam.setEnabled(true);
+    assert.equal(roam.relocateTo(1200, 700), true);
+    // hammer the scheduler mid-walk like tick.js does every 250ms
+    let prevX = 400;
+    for (let i = 0; i < 1200; i += 1) {
+      mock.timers.tick(16);
+      roam.tick();
+      const frames = ctx._appliedBounds;
+      if (frames.length) {
+        const x = frames[frames.length - 1].x;
+        assert.ok(
+          x >= prevX,
+          `X must move monotonically toward the target, saw ${prevX} -> ${x}`,
+        );
+        prevX = x;
+      }
+      if (
+        ctx._stateLog.some((e) => e.type === "setState" && e.state === "idle")
+      )
+        break;
+    }
+    assert.equal(prevX, 1200, "relocation reached its target uncontested");
+  });
+
+  it("uses the frozen effective size for every frame (#569 anchoring)", () => {
+    const ctx = makeCtx({
+      getEffectiveCurrentPixelSize: () => ({ width: 200, height: 200 }),
+    });
+    const roam = roamModule(ctx);
+    roam.relocateTo(800, 600);
+    finish(ctx);
+    assert.ok(ctx._appliedBounds.length > 0);
+    for (const b of ctx._appliedBounds) {
+      assert.equal(b.width, 200, "frames anchored to effective size");
+      assert.equal(b.height, 200);
+    }
+  });
+
+  it("yields to an active drag: refuses to start, cancels mid-walk", () => {
+    const ctx = makeCtx({ dragLocked: true });
+    const roam = roamModule(ctx);
+    assert.equal(roam.relocateTo(900, 500), false, "no walk during a drag");
+    assert.equal(ctx._appliedBounds.length, 0);
+
+    const ctx2 = makeCtx();
+    const roam2 = roamModule(ctx2);
+    roam2.relocateTo(1400, 800);
+    mock.timers.tick(16);
+    mock.timers.tick(16);
+    const framesBefore = ctx2._appliedBounds.length;
+    assert.ok(framesBefore > 0, "walk started");
+    ctx2.dragLocked = true;
+    mock.timers.tick(16);
+    const framesAfterOne = ctx2._appliedBounds.length;
+    mock.timers.tick(320);
+    assert.equal(
+      ctx2._appliedBounds.length,
+      framesAfterOne,
+      "no frames after drag takes over",
+    );
+  });
+
+  it("walks in the roam pose with correct heading (no frozen-pose slide)", () => {
+    const headings = [];
+    const ctx = makeCtx({
+      setRoamHeading(left) {
+        headings.push(left);
+      },
+    });
+    ctx.setCurrentState("working");
+    const roam = roamModule(ctx);
+    roam.relocateTo(200, 300); // leftward
+    finish(ctx);
+    assert.ok(
+      ctx._stateLog.some((e) => e.type === "applyState" && e.state === "roam"),
+      "walk pose applied",
+    );
+    assert.deepEqual(headings, [true], "leftward relocation mirrors the sprite");
+  });
+});

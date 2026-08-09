@@ -63,6 +63,12 @@ module.exports = function initRoam(ctx) {
   function isRoamAllowed() {
     if (!enabled) return false;
     if (ctx.dragLocked) return false;
+    // Hold still while the pet's context menu is open: without this gate the
+    // scheduling chain keeps running through the popup's nested loop and a
+    // walk starts ~4s in, strolling the pet out from under its own menu.
+    // tick()'s not-allowed path also resets firstRoam, so closing the menu
+    // gives the full idle delay instead of an accelerated walk.
+    if (ctx.menuOpen) return false;
     if (ctx.getMiniMode && ctx.getMiniMode()) return false;
     const state = ctx.getCurrentState ? ctx.getCurrentState() : "idle";
     // Allow roaming when idle (about to start) or already roaming (mid-animation)
@@ -78,6 +84,47 @@ module.exports = function initRoam(ctx) {
       ctx.isImeEditingActive()
     )
       return false;
+    return true;
+  }
+
+  // Directed walk (fork: fence relocation). Unlike a wander, it may run in
+  // ANY pet state — the user just drew a fence to move the pet out of the
+  // way NOW — but still yields to an active drag and to mini mode, and it
+  // reuses animateTo() wholesale so it inherits the roam pose + heading,
+  // the frozen-size anchoring (#569), reconcile protection via
+  // isRoamAnimating(), and single-writer scheduling (roamActive blocks
+  // tick()/scheduleNextRoam from arming a competing wander).
+  function isDirectedWalkAllowed() {
+    if (ctx.dragLocked) return false;
+    if (ctx.getMiniMode && ctx.getMiniMode()) return false;
+    if (ctx.miniTransitioning) return false;
+    return true;
+  }
+
+  function relocateTo(targetX, targetY) {
+    if (!isDirectedWalkAllowed()) return false;
+    const bounds = ctx.getPetWindowBounds();
+    if (!bounds) return false;
+    cancelRoam();
+    const effectiveSize =
+      typeof ctx.getEffectiveCurrentPixelSize === "function"
+        ? ctx.getEffectiveCurrentPixelSize()
+        : null;
+    const size = {
+      width:
+        effectiveSize &&
+        Number.isFinite(effectiveSize.width) &&
+        effectiveSize.width > 0
+          ? effectiveSize.width
+          : bounds.width,
+      height:
+        effectiveSize &&
+        Number.isFinite(effectiveSize.height) &&
+        effectiveSize.height > 0
+          ? effectiveSize.height
+          : bounds.height,
+    };
+    animateTo({ x: targetX, y: targetY, size, directed: true });
     return true;
   }
 
@@ -512,7 +559,12 @@ module.exports = function initRoam(ctx) {
       }
       // Re-check state on every frame: if the pet is no longer idle/roam (e.g. a
       // working/notification event arrived), stop the animation immediately.
-      if (!isRoamAllowed()) {
+      // A directed walk ignores the state/enabled gates by design (it must
+      // run mid-work) and stops only for drag/mini.
+      const frameAllowed = target.directed
+        ? isDirectedWalkAllowed()
+        : isRoamAllowed();
+      if (!frameAllowed) {
         // A drag only pauses the current roam phase; other gates still mean the
         // pet left normal idle eligibility and reset the next wait to 8s.
         if (!ctx.dragLocked) firstRoam = true;
@@ -671,6 +723,7 @@ module.exports = function initRoam(ctx) {
   return {
     setEnabled,
     setConstrainAxis,
+    relocateTo,
     cancelRoam,
     tick,
     isRoamAnimating,

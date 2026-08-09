@@ -11,12 +11,20 @@
 
 import AppKit
 
+// Borderless windows refuse key status by default, which would leave Esc
+// dead and the user trapped behind a full-screen overlay. Override.
+final class OverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
+
 final class SelectionView: NSView {
     var dragStart: NSPoint?
     var dragRect: NSRect = .zero
     var onDone: ((NSRect?) -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .crosshair)
@@ -102,8 +110,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The fence is expressed in fractions of the WORK AREA (menu bar and
         // Dock excluded) — same rectangle Clawd's roam picker uses.
         let work = screen.visibleFrame
+        // Multi-display: the fence file stores fractions with no display
+        // identity; Clawd resolves them against the work area nearest the
+        // PET. Drawing on a different display than the pet transposes the
+        // rectangle onto the pet's display. Say which one was captured.
+        FileHandle.standardOutput.write(
+            "fence-draw: capturing on \(screen.localizedName) (fractions apply to the pet's display)\n"
+                .data(using: .utf8)!)
 
-        window = NSWindow(
+        window = OverlayWindow(
             contentRect: screen.frame,
             styleMask: .borderless,
             backing: .buffered,
@@ -116,8 +131,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let view = SelectionView(frame: NSRect(origin: .zero, size: screen.frame.size))
         view.onDone = { [weak self] rect in
-            defer { NSApp.terminate(nil) }
-            guard let rect = rect, let self = self else { return }
+            guard let rect = rect, let self = self else {
+                NSApp.terminate(nil) // Esc pressed (or app going away)
+                return
+            }
             // View/window coords share the screen's origin (window covers the
             // full screen frame). Convert to global, then to work-area
             // fractions with a top-left convention (top = distance from the
@@ -129,12 +146,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 height: rect.height
             )
             let clamped = globalRect.intersection(work)
-            guard clamped.width > 0, clamped.height > 0 else { return }
+            guard clamped.width > 0, clamped.height > 0 else {
+                FileHandle.standardError.write(
+                    "fence-draw: selection outside the work area — draw again or Esc\n"
+                        .data(using: .utf8)!)
+                return
+            }
             let left = (clamped.minX - work.minX) / work.width
             let right = (clamped.maxX - work.minX) / work.width
             let top = (work.maxY - clamped.maxY) / work.height
             let bottom = (work.maxY - clamped.minY) / work.height
             self.writeFence(left: left, top: top, right: right, bottom: bottom)
+            NSApp.terminate(nil)
         }
         window.contentView = view
         window.makeKeyAndOrderFront(nil)
@@ -149,9 +172,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             format: "{\"enabled\": true, \"left\": %.4f, \"top\": %.4f, \"right\": %.4f, \"bottom\": %.4f}",
             max(0, left), max(0, top), min(1, right), min(1, bottom)
         )
+        let env = ProcessInfo.processInfo.environment["CLAWD_FENCE_FILE"]
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".clawd")
-        let path = dir.appendingPathComponent("roam-area.json")
+        let path = env.map { URL(fileURLWithPath: $0) }
+            ?? dir.appendingPathComponent("roam-area.json")
         do {
             try FileManager.default.createDirectory(
                 at: dir, withIntermediateDirectories: true)

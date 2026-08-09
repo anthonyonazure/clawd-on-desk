@@ -22,8 +22,10 @@ case "$1" in
     # Binary built from fence-draw.swift (see README).
     DRAW="${HOME}/.clawd/mods/clawd-fence-draw"
     if [[ ! -x "$DRAW" ]]; then
+      mkdir -p "${HOME}/.clawd/mods"
+      SRC="${0:A:h}/fence-draw.swift"
       echo "clawd-roam: $DRAW missing — build it with:"
-      echo "  swiftc -O tools/outlaw/fence-draw.swift -o $DRAW"
+      echo "  swiftc -O \"$SRC\" -o \"$DRAW\""
       exit 1
     fi
     exec "$DRAW"
